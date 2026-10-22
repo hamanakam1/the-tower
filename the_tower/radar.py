@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 import psutil
 
 from .schemas import Node, NodeSpec, Telemetry, ThermalState, NodeStatus
+from .sensors import read_temperature
 
 
 def thermal_state_for(temp_c: float, redline: float) -> ThermalState:
@@ -47,8 +48,11 @@ class RadarSweep:
         now = time.time()
         out: Dict[str, Telemetry] = {}
         for nid, node in self.nodes.items():
-            if not getattr(node.spec, "simulate", True):
-                # agent-managed node: don't fabricate telemetry; check staleness
+            sampler = getattr(node.spec, "sampler", None) or (
+                "simulated" if getattr(node.spec, "simulate", True) else "agent")
+            if sampler == "agent":
+                # agent-managed node: never fabricate telemetry, only check
+                # that the agent is still alive
                 age = (datetime.now(timezone.utc) - node.last_seen).total_seconds()
                 if age > node.spec.staleness_budget_s:
                     node.status = NodeStatus.UNKNOWN
@@ -81,37 +85,30 @@ class RadarSweep:
         return NodeStatus.ONLINE
 
     def _sample(self, nid: str, node: Node, now: float) -> Telemetry:
-        # The local host is sampled with real metrics; every other node is
-        # either agent-driven (ingested) or simulated.
-        if node.spec.location == "local" or nid == "m3max":
+        """Pick the sampler for this node.
+
+        The sampler is a property of the node, not a hardcoded node id: any
+        node can be a local machine, an agent-driven machine, or simulated.
+        """
+        sampler = getattr(node.spec, "sampler", None)
+        if sampler is None:
+            sampler = "local" if node.spec.location == "local" else "simulated"
+        if sampler == "local":
             return self._sample_local(node, now)
+        if sampler == "agent":
+            # never fabricate for an agent-driven node
+            return node.telemetry
         return self._sample_simulated(nid, node, now)
 
     def _sample_local(self, node: Node, now: float) -> Telemetry:
         cpu = psutil.cpu_percent(interval=None)
         vm = psutil.virtual_memory()
-        # temperature (macOS: psutil.sensors_temperatures may be empty)
-        temp = None
-        try:
-            temps = psutil.sensors_temperatures()
-            for key in ("cpu_thermal", "coretemp", "Apple", "cpu-thermal"):
-                if key in temps and temps[key]:
-                    temp = temps[key][0].current
-                    break
-            if temp is None and temps:
-                first = next(iter(temps.values()))
-                if first:
-                    temp = first[0].current
-        except Exception:
-            temp = None
-        source = "measured"
-        note = None
-        if temp is None:
-            # macOS exposes no CPU thermal sensor through psutil. Estimate
-            # from load and say so — an honest estimate beats a silent fiction.
-            temp = 45.0 + (cpu / 100.0) * 30.0 + random.uniform(-2, 2)
-            source = "measured (thermal estimated)"
-            note = "temperature estimated from cpu load; no thermal sensor available"
+        # temperature: a real sensor if the platform has one, otherwise an
+        # estimate that says so.
+        reading = read_temperature(getattr(node.spec, "sensor", None), cpu)
+        temp = reading.celsius if reading.celsius is not None else 45.0
+        source = reading.source
+        note = reading.note
         # power estimate
         power = 15.0 + (cpu / 100.0) * 60.0 + (vm.percent / 100.0) * 10.0
         bw = random.uniform(50, 400)

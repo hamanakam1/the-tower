@@ -140,6 +140,11 @@ class NodeSpec(BaseModel):
     thermal_mass: float = Field(default=1.0, gt=0.0, description="Thermal inertia factor")
     location: str = "local"
     simulate: bool = Field(default=True, description="Whether radar simulates telemetry for this node")
+    sampler: str = Field(default="simulated",
+                         description="Telemetry source: 'simulated', 'local', or 'agent'")
+    sensor: Optional[str] = Field(default=None,
+                                  description="Temperature backend: 'psutil', 'osx-cpu-temp', "
+                                              "'estimate', or null for auto")
     staleness_budget_s: int = Field(default=30, gt=0, description="Seconds before telemetry is considered stale")
     enforcement: str = Field(default="enforce", pattern="^(advisory|enforce)$",
                              description="'advisory' recommends but never kills; 'enforce' acts")
@@ -333,6 +338,7 @@ def default_nodes() -> List[NodeSpec]:
             network_capacity_mbps=10000.0,
             thermal_mass=4.0,
             location="local",
+            sampler="local",
         ),
         NodeSpec(
             id="pi-cluster",
