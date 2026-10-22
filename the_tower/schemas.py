@@ -23,6 +23,7 @@ class NodeStatus(str, Enum):
     DEGRADED = "degraded"
     OVERLOADED = "overloaded"
     REDLINE = "redline"
+    UNKNOWN = "unknown"
 
 
 class ThermalState(str, Enum):
@@ -131,6 +132,8 @@ class NodeSpec(BaseModel):
     network_capacity_mbps: float = Field(gt=0.0)
     thermal_mass: float = Field(default=1.0, gt=0.0, description="Thermal inertia factor")
     location: str = "local"
+    simulate: bool = Field(default=True, description="Whether radar simulates telemetry for this node")
+    staleness_budget_s: int = Field(default=30, gt=0, description="Seconds before telemetry is considered stale")
 
 
 class Node(BaseModel):
@@ -169,7 +172,7 @@ class Node(BaseModel):
         }
 
     def can_accept(self, weight: ResourceWeight) -> bool:
-        if self.status in (NodeStatus.OFFLINE, NodeStatus.REDLINE):
+        if self.status in (NodeStatus.OFFLINE, NodeStatus.REDLINE, NodeStatus.UNKNOWN):
             return False
         if self.telemetry.thermal_state in (ThermalState.CRITICAL,):
             return False

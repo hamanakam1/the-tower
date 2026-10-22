@@ -376,10 +376,18 @@ class Tower:
             # actual process kill (best effort) for local containers
             killed_proc = False
             try:
-                # if container_id looks like a pid
-                if req.container_id.isdigit():
+                # Only kill processes the Tower actually owns. A numeric
+                # container_id is treated as a PID only when that container
+                # was explicitly registered with a matching pid.
+                info = self.containers.get(req.container_id)
+                pid = None
+                if info is not None:
+                    pid = (info.get("metadata") or {}).get("pid")
+                    if pid is None and req.container_id.isdigit():
+                        pid = int(req.container_id)
+                if pid is not None and info is not None:
                     import os, signal
-                    os.kill(int(req.container_id), signal.SIGKILL)
+                    os.kill(int(pid), signal.SIGKILL)
                     killed_proc = True
             except Exception:
                 killed_proc = False
@@ -388,6 +396,9 @@ class Tower:
                        container_id=req.container_id,
                        message=f"KILL executed: {req.container_id} ({req.reason})",
                        severity="critical")
+            self.log_audit({"kind": "kill", "container_id": req.container_id,
+                            "flight_id": flight_id, "node_id": node_id,
+                            "reason": req.reason, "requester": req.requester})
             response = KillResponse(
                 success=True,
                 container_id=req.container_id,

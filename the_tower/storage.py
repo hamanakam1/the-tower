@@ -132,6 +132,20 @@ class Storage:
             ),
         )
         self.conn.commit()
+        # audit trail: record every flight state transition in the hash chain
+        try:
+            self.append_audit({
+                "kind": "flight_state",
+                "flight_id": f.id,
+                "callsign": f.callsign,
+                "status": f.status.value if hasattr(f.status, "value") else str(f.status),
+                "assigned_node": f.assigned_node,
+                "reason": f.reason,
+                "priority": int(f.priority),
+                "rogue": f.rogue,
+            })
+        except Exception:
+            pass
 
     @_serialised
     def load_flights(self) -> List[Flight]:

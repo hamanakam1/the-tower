@@ -47,6 +47,13 @@ class RadarSweep:
         now = time.time()
         out: Dict[str, Telemetry] = {}
         for nid, node in self.nodes.items():
+            if not getattr(node.spec, "simulate", True):
+                # agent-managed node: don't fabricate telemetry; check staleness
+                age = (datetime.now(timezone.utc) - node.last_seen).total_seconds()
+                if age > node.spec.staleness_budget_s:
+                    node.status = NodeStatus.UNKNOWN
+                out[nid] = node.telemetry
+                continue
             t = self._sample(nid, node, now)
             node.telemetry = t
             node.last_seen = datetime.now(timezone.utc)

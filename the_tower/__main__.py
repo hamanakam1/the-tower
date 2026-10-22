@@ -53,6 +53,12 @@ async def cmd_serve(args):
             cfg = yaml.safe_load(f) or {}
         db_path = cfg.get("db_path", db_path)
         interval = cfg.get("radar_interval", interval)
+        if cfg.get("token"):
+            import os
+            os.environ.setdefault("TOWER_TOKEN", str(cfg["token"]))
+        if cfg.get("rate_limit") is not None:
+            import os
+            os.environ.setdefault("TOWER_RATE_LIMIT", str(cfg["rate_limit"]))
         if cfg.get("nodes"):
             from .schemas import NodeSpec
             nodes = [NodeSpec(**n) for n in cfg["nodes"]]
