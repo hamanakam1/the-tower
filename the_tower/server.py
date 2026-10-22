@@ -154,6 +154,39 @@ class TowerServer:
             resp = await tower.request_clearance(req)
             return JSONResponse(resp.model_dump(mode="json"))
 
+        async def clearance_v2(request):
+            """Clearance contract v2: idempotent, explainable, 202 on accept."""
+            body = await request.json()
+            key = body.get("idempotency_key")
+            if key:
+                cached = tower.idempotent_result(key)
+                if cached is not None:
+                    return JSONResponse(cached, status_code=200)
+            from .schemas import Flight, ResourceWeight, FlightPriority
+            constraints = body.get("constraints") or {}
+            flight = Flight(
+                task=body.get("task", "unnamed task"),
+                requester=body.get("requester", "el-hidratador"),
+                priority=FlightPriority(body.get("priority", 2)),
+                weight=ResourceWeight(**(body.get("weight") or {})),
+                container_id=body.get("container_id"),
+                preferred_node=constraints.get("preferred_node"),
+                scope=body.get("scope", []),
+                metadata={"idempotency_key": key} if key else {},
+            )
+            resp = await tower.request_clearance(ClearanceRequest(flight=flight))
+            payload = resp.model_dump(mode="json")
+            if key:
+                tower.remember_idempotent(key, payload)
+            status = 202 if resp.decision.value == "cleared" else 200
+            return JSONResponse(payload, status_code=status)
+
+        async def last_decision(request):
+            d = tower._last_decision
+            if d is None:
+                return JSONResponse({"decision": None})
+            return JSONResponse(d.to_dict())
+
         async def kill(request):
             body = {}
             try:
@@ -276,6 +309,8 @@ class TowerServer:
             Route("/radar", radar),
             Route("/status/{node_id}", status_node),
             Route("/clearance", clearance, methods=["POST"]),
+            Route("/clearance/v2", clearance_v2, methods=["POST"]),
+            Route("/decision/last", last_decision),
             Route("/kill/{container_id}", kill, methods=["POST"]),
             Route("/airspace", airspace),
             Route("/events", events),

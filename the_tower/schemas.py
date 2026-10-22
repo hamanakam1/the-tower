@@ -247,6 +247,10 @@ class ClearanceResponse(BaseModel):
     assigned_node: Optional[str] = None
     reason: str
     estimated_wait_s: Optional[float] = None
+    admission: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Explainability block: policy version, node state at decision, scores",
+    )
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

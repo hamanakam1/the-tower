@@ -106,3 +106,33 @@ def test_flight_detail(client):
     r2 = client.get(f"/flights/{fid}")
     assert r2.status_code == 200
     assert r2.json()["flight"]["id"] == fid
+
+
+def test_clearance_v2_returns_202_and_admission_block(client):
+    r = client.post("/clearance/v2", json={
+        "idempotency_key": "k-1",
+        "task": "distill",
+        "scope": ["model/x"],
+        "priority": 1,
+        "weight": {"cpu_cores": 1, "memory_gb": 2, "duration_est_s": 10},
+    })
+    assert r.status_code in (200, 202)
+    body = r.json()
+    assert body["decision"] in ("cleared", "queued", "shot_down")
+    assert body["admission"]["policy_version"]
+    assert "scored" in body["admission"]
+
+
+def test_clearance_v2_is_idempotent(client):
+    payload = {"idempotency_key": "k-2", "task": "retry me",
+               "weight": {"cpu_cores": 1, "memory_gb": 2, "duration_est_s": 10}}
+    r1 = client.post("/clearance/v2", json=payload)
+    r2 = client.post("/clearance/v2", json=payload)
+    assert r1.json()["flight_id"] == r2.json()["flight_id"]
+
+
+def test_last_decision_endpoint(client):
+    client.post("/clearance", json={"task": "x", "weight": {"cpu_cores": 1, "memory_gb": 1}})
+    r = client.get("/decision/last")
+    assert r.status_code == 200
+    assert r.json()["decision"] in ("cleared", "queued", "shot_down", "denied")
