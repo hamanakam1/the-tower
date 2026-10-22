@@ -52,10 +52,16 @@ Unlike cloud-native applications that assume infinite compute, The Tower operate
 
 ## Core Systems
 
-- **Radar Sweep** - 5-second telemetry polling across all nodes
-- **Flight Clearance** - Dynamic dispatch algorithm based on resource weight
-- **Anomaly Radar** - Predictive ML on thermal/memory trends
-- **Anti-Air Battery** - Hard-kill switch for runaway processes
+- **Radar Sweep** - 5-second telemetry polling across all nodes (real psutil + simulated edge nodes)
+- **Flight Clearance** - Dynamic dispatch algorithm based on resource weight and node scoring
+- **Anomaly Radar** - Predictive ML on thermal/memory/power trends (linear regression + z-score spikes)
+- **Anti-Air Battery** - Hard-kill switch for runaway processes and stale containers
+- **Scope Conflicts** - Resource-key conflict detection with priority preemption
+- **Priority Dispatch Queue** - Queued flights re-dispatched when capacity frees
+- **Container Registry** - Heartbeat-based liveness with auto-kill on timeout
+- **Persistence** - SQLite-backed flights, events, telemetry, audit hash chain
+- **Live Push** - WebSocket airspace broadcasts
+- **Auth** - Optional bearer token for mutating endpoints
 
 ## Hardware Topology
 
@@ -84,6 +90,14 @@ the-tower status           # node health
 - `GET /events` - Recent tower events
 - `GET /flights` - All flights
 - `GET /trend/:node` - Thermal/memory trend analysis
+- `POST /nodes` - Register a node
+- `DELETE /nodes/:node` - Unregister a node
+- `POST /containers` - Register a container
+- `GET /containers` - List containers
+- `POST /containers/:id/heartbeat` - Container heartbeat
+- `GET /conflicts?scope=` - Scope conflict check
+- `GET /audit/verify` - Verify audit hash chain
+- `WS /ws` - Live airspace push
 
 ## Visualization
 

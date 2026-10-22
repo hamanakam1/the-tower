@@ -184,6 +184,10 @@
       <div class="events" id="events"></div>
     </div>
     <div class="panel" style="margin-top:14px;">
+      <h3>Containers</h3>
+      <div id="containers" style="font-size:11px;"></div>
+    </div>
+    <div class="panel" style="margin-top:14px;">
       <h3>Trends</h3>
       <div id="trends"></div>
     </div>
@@ -221,6 +225,10 @@ async function refresh() {
     const ev = await fetchJSON("/events?limit=60");
     renderEvents(ev.events);
     renderTrends(state.nodes);
+    try {
+      const cc = await fetchJSON("/containers");
+      renderContainers(cc.containers);
+    } catch(e){}
   } catch (e) { console.error(e); }
 }
 
@@ -277,6 +285,14 @@ function renderFlights(flights) {
   }).join("") || `<tr><td colspan="5" style="color:var(--muted);text-align:center;">No flights</td></tr>`;
 }
 
+function renderContainers(cs) {
+  const el = document.getElementById("containers");
+  if (!cs || !cs.length) { el.innerHTML = '<span style="color:var(--muted)">No containers</span>'; return; }
+  el.innerHTML = cs.map(c => `<div style="padding:4px 0;border-bottom:1px solid var(--border);">
+    <b style="color:var(--cyan)">${c.container_id}</b> <span style="color:var(--muted)">${c.status}</span><br/>
+    <span style="color:var(--muted)">node: ${c.node_id||"—"} · hb: ${new Date(c.last_heartbeat).toLocaleTimeString()}</span>
+  </div>`).join("");
+}
 function renderEvents(evs) {
   const el = document.getElementById("events");
   el.innerHTML = evs.slice().reverse().map(e => `
