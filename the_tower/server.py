@@ -189,6 +189,20 @@ class TowerServer:
             aid = tower.log_audit(body)
             return JSONResponse({"audit_id": aid})
 
+        async def node_history(request):
+            node_id = request.path_params["node_id"]
+            node = tower.get_node(node_id)
+            if not node:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            # from storage if available, else in-memory history
+            hist = node.history
+            if tower.storage is not None:
+                try:
+                    hist = tower.storage.load_telemetry(node_id, limit=120)
+                except Exception:
+                    pass
+            return JSONResponse({"node_id": node_id, "samples": [t.model_dump(mode="json") for t in hist]})
+
         async def flight_detail(request):
             fid = request.path_params["flight_id"]
             f = tower.flights.get(fid)
@@ -240,6 +254,7 @@ class TowerServer:
             Route("/flights", flights),
             Route("/flights/{flight_id}", flight_detail),
             Route("/trend/{node_id}", trend),
+            Route("/history/{node_id}", node_history),
             Route("/ingest/{node_id}", ingest, methods=["POST"]),
             Route("/nodes", register_node, methods=["POST"]),
             Route("/nodes/{node_id}", unregister_node, methods=["DELETE"]),

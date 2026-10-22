@@ -26,6 +26,7 @@ def build_parser():
     radar = sub.add_parser("radar", help="Print one radar sweep and exit")
     status = sub.add_parser("status", help="Print node status")
     status.add_argument("node", nargs="?")
+    status.add_argument("--watch", action="store_true", help="Continuously refresh")
 
     demo = sub.add_parser("demo", help="Seed demo flights against a running Tower")
     demo.add_argument("--port", type=int, default=8765)
@@ -82,17 +83,23 @@ async def cmd_radar(args):
 async def cmd_status(args):
     tower = Tower()
     await tower.start()
-    await tower.radar.sweep_once()
-    if args.node:
-        n = tower.get_node(args.node)
-        if not n:
-            print(f"unknown node: {args.node}", file=sys.stderr)
-            return 1
-        print(json.dumps({"node": n.model_dump(mode="json"), "trend": tower.trend(args.node)}, indent=2))
-    else:
-        for n in tower.radar_snapshot():
-            print(f"{n.spec.id:12} status={n.status.value:10} temp={n.telemetry.temperature_c:5.1f}C "
-                  f"cpu={n.telemetry.cpu_percent:5.1f}% mem={n.telemetry.memory_percent:5.1f}%")
+    while True:
+        await tower.radar.sweep_once()
+        if args.node:
+            n = tower.get_node(args.node)
+            if not n:
+                print(f"unknown node: {args.node}", file=sys.stderr)
+                await tower.stop()
+                return 1
+            print(json.dumps({"node": n.model_dump(mode="json"), "trend": tower.trend(args.node)}, indent=2))
+        else:
+            print("\033[2J\033[H", end="")
+            for n in tower.radar_snapshot():
+                print(f"{n.spec.id:12} status={n.status.value:10} temp={n.telemetry.temperature_c:5.1f}C "
+                      f"cpu={n.telemetry.cpu_percent:5.1f}% mem={n.telemetry.memory_percent:5.1f}%")
+        if not args.watch:
+            break
+        await asyncio.sleep(2)
     await tower.stop()
 
 
