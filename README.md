@@ -71,10 +71,17 @@ thermals, memory and power of each machine in the mesh.
     <td width="50%"><img alt="the anti-air battery, the hard kill-switch" src="docs/screenshots/anti-air-battery.png"><br><sub><b>anti-air battery</b> &mdash; the hard kill. Name a container and it dies; no approval, no grace period.</sub></td>
     <td width="50%"><img alt="the trends panel, tracking thermal slope and the power redline" src="docs/screenshots/trends.png"><br><sub><b>trends</b> &mdash; thermal slope and memory slope per node, and the estimated time to the power redline. A node that is trending to failure gets warned about before it fails.</sub></td>
   </tr>
+  <tr>
+    <td width="50%"><img alt="the clearance request form" src="docs/screenshots/clearance-request.png"><br><sub><b>clearance request</b> &mdash; ask for takeoff with a resource weight, a priority and an optional node preference.</sub></td>
+    <td width="50%"><img alt="the container registry" src="docs/screenshots/containers.png"><br><sub><b>containers</b> &mdash; every registered container and the last time it was heard from. Silence is what gets a container killed.</sub></td>
+  </tr>
 </table>
 
 Every screenshot above was captured from a running Tower seeded with the
-synthetic demo fleet, so the callsigns and the telemetry are fictional.
+synthetic demo fleet, so the callsigns and the telemetry are fictional. The
+same console on a narrow viewport:
+
+<img alt="the Tower dashboard in its single-column responsive layout" src="docs/screenshots/dashboard-narrow.png" width="420">
 
 ## Architecture
 
@@ -144,27 +151,9 @@ the-tower status           # node health
 
 ## Visualization
 
-Open the dashboard at `http://127.0.0.1:8765/` for the live radar, node health, flight board, and anti-air battery controls.
+Open the dashboard at `http://127.0.0.1:8765/` for the live radar, node health, flight board, and anti-air battery controls. The panels are captured in [The dashboard](#the-dashboard) above.
 
-### Screenshots
-
-| | |
-|---|---|
-| ![Tower dashboard overview](docs/screenshots/dashboard-overview.png) <br/> **Tower dashboard** — live radar, node health, flight board, event log and anti-air battery. | ![Radar sweep](docs/screenshots/radar.png) <br/> **Radar** — node blips, in-flight traffic and airspace counters. |
-| ![Flight board](docs/screenshots/flight-board.png) <br/> **Flight board** — callsign, task, assigned node, priority and status. | ![Anti-air battery](docs/screenshots/anti-air-battery.png) <br/> **Anti-air battery** — the kill console. |
-
-<details>
-<summary>More views</summary>
-
-| | |
-|---|---|
-| ![Node health](docs/screenshots/nodes.png) <br/> **Node health** — CPU, memory, temperature, power, battery and solar per node. | ![Event log](docs/screenshots/event-log.png) <br/> **Event log** — clearance, kill and redline events as they happen. |
-| ![Clearance request](docs/screenshots/clearance-request.png) <br/> **Clearance request** — ask for takeoff with a resource weight. | ![Telemetry trends](docs/screenshots/trends.png) <br/> **Trends** — thermal slope and time-to-redline per node. |
-| ![Containers](docs/screenshots/containers.png) <br/> **Containers** — registered containers and their heartbeats. | ![Responsive layout](docs/screenshots/dashboard-narrow.png) <br/> **Responsive layout** — the same console on a narrow viewport. |
-
-</details>
-
-## Architecture
+## Target Architecture
 
 The Tower is an admission-control plane for physical compute: it decides
 where a task may run and what it may do to the machine, and it records every
