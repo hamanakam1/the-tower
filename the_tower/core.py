@@ -82,15 +82,23 @@ class Tower:
         self._started_at = time.time()
         # load persisted state
         if self.storage is not None:
-            for f in self.storage.load_flights():
+            for f in await self._store(self.storage.load_flights) or []:
                 self.flights[f.id] = f
-            for e in self.storage.load_events():
+            for e in await self._store(self.storage.load_events) or []:
                 self.events.append(e)
             for nid, node in self.nodes.items():
-                hist = self.storage.load_telemetry(nid, limit=60)
+                hist = await self._store(self.storage.load_telemetry, nid, 60) or []
                 if hist:
                     node.history = hist
                     node.telemetry = hist[-1]
+            for c in await self._store(self.storage.load_containers) or []:
+                hb = c.get("last_heartbeat")
+                if isinstance(hb, str):
+                    try:
+                        c["last_heartbeat"] = datetime.fromisoformat(hb)
+                    except ValueError:
+                        pass
+                self.containers[c["container_id"]] = c
         # initial sweep to populate real telemetry
         await self.radar.sweep_once()
         await self.radar.start()
@@ -113,7 +121,17 @@ class Tower:
         )
         self.events.append(ev)
         if self.storage is not None:
-            self.storage.append_event(ev)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(asyncio.to_thread(self.storage.append_event, ev))
+                else:
+                    self.storage.append_event(ev)
+            except Exception:
+                try:
+                    self.storage.append_event(ev)
+                except Exception:
+                    pass
         logger.debug("event %s %s", ev.kind.value, ev.message)
         for cb in list(self._subscribers):
             try:
@@ -132,7 +150,7 @@ class Tower:
     async def _on_sweep(self, samples):
         if self.storage is not None:
             for nid, node in self.nodes.items():
-                self.storage.append_telemetry(node.telemetry)
+                await self._store(self.storage.append_telemetry, node.telemetry)
         # anomaly analysis per node
         for nid, node in self.nodes.items():
             for ev in self.anomaly.analyze_node(node):
@@ -171,7 +189,7 @@ class Tower:
                     flight.shot_down_at = datetime.now(timezone.utc)
                     flight.reason = "auto-kill: node redline breach (max retries)"
                 if self.storage is not None:
-                    self.storage.upsert_flight(flight)
+                    await self._store(self.storage.upsert_flight, flight)
                 self._emit(EventKind.SHOT_DOWN, node_id=node_id, flight_id=fid,
                            message=f"SHOT DOWN {flight.callsign} on {node.spec.name}: redline breach",
                            severity="critical", data={"auto": True})
@@ -191,7 +209,7 @@ class Tower:
                     if node:
                         node.active_weights.pop(fid, None)
                     if self.storage is not None:
-                        self.storage.upsert_flight(flight)
+                        await self._store(self.storage.upsert_flight, flight)
                     self._emit(EventKind.LANDING, node_id=flight.assigned_node, flight_id=fid,
                                message=f"{flight.callsign} landed on {flight.assigned_node}",
                                severity="info")
@@ -225,7 +243,7 @@ class Tower:
                 flight.shot_down_at = datetime.now(timezone.utc)
                 flight.reason = "rogue flight declared - shot down on approach"
                 if self.storage is not None:
-                    self.storage.upsert_flight(flight)
+                    await self._store(self.storage.upsert_flight, flight)
                 self._emit(EventKind.SHOT_DOWN, flight_id=flight.id,
                            message=f"SHOT DOWN on approach: {flight.callsign} (rogue)",
                            severity="critical")
@@ -237,14 +255,14 @@ class Tower:
             if conflict_id:
                 existing = self.flights.get(conflict_id)
                 if existing and int(flight.priority) < int(existing.priority):
-                    self._preempt(conflict_id, f"preempted by {flight.callsign} (higher priority)")
+                    await self._preempt(conflict_id, f"preempted by {flight.callsign} (higher priority)")
                 else:
                     flight.status = FlightStatus.QUEUED
                     flight.assigned_node = existing.assigned_node if existing else None
                     if flight.assigned_node and flight.assigned_node in self.nodes:
                         self.nodes[flight.assigned_node].queued_flights.append(flight.id)
                     if self.storage is not None:
-                        self.storage.upsert_flight(flight)
+                        await self._store(self.storage.upsert_flight, flight)
                     self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
                                message=f"Queued: {flight.callsign} - scope conflict with {existing.callsign if existing else conflict_id}",
                                severity="warn")
@@ -271,7 +289,7 @@ class Tower:
                 if node:
                     self.nodes[node].queued_flights.append(flight.id)
                 if self.storage is not None:
-                    self.storage.upsert_flight(flight)
+                    await self._store(self.storage.upsert_flight, flight)
                 self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
                            message=f"Denied/queued: {flight.callsign} - no capacity",
                            severity="warn")
@@ -289,7 +307,7 @@ class Tower:
                 flight.shot_down_at = datetime.now(timezone.utc)
                 flight.reason = "anomaly radar: node in runaway state - flight shot down"
                 if self.storage is not None:
-                    self.storage.upsert_flight(flight)
+                    await self._store(self.storage.upsert_flight, flight)
                 self._emit(EventKind.SHOT_DOWN, node_id=best_node.spec.id, flight_id=flight.id,
                            message=f"SHOT DOWN: {flight.callsign} - target node runaway",
                            severity="critical")
@@ -305,7 +323,7 @@ class Tower:
             best_node.active_flights.append(flight.id)
             best_node.active_weights[flight.id] = flight.weight
             if self.storage is not None:
-                self.storage.upsert_flight(flight)
+                await self._store(self.storage.upsert_flight, flight)
             if flight.id in best_node.queued_flights:
                 best_node.queued_flights = [f for f in best_node.queued_flights if f != flight.id]
             self._emit(EventKind.CLEARANCE_GRANTED, node_id=best_node.spec.id, flight_id=flight.id,
@@ -372,7 +390,7 @@ class Tower:
                 if node:
                     node.active_weights.pop(flight_id, None)
                 if flight and self.storage is not None:
-                    self.storage.upsert_flight(flight)
+                    await self._store(self.storage.upsert_flight, flight)
             # actual process kill (best effort) for local containers
             killed_proc = False
             try:
@@ -396,9 +414,9 @@ class Tower:
                        container_id=req.container_id,
                        message=f"KILL executed: {req.container_id} ({req.reason})",
                        severity="critical")
-            self.log_audit({"kind": "kill", "container_id": req.container_id,
-                            "flight_id": flight_id, "node_id": node_id,
-                            "reason": req.reason, "requester": req.requester})
+            await self.log_audit_async({"kind": "kill", "container_id": req.container_id,
+                                        "flight_id": flight_id, "node_id": node_id,
+                                        "reason": req.reason, "requester": req.requester})
             response = KillResponse(
                 success=True,
                 container_id=req.container_id,
@@ -454,7 +472,7 @@ class Tower:
                 f.shot_down_at = datetime.now(timezone.utc)
                 f.reason = "node unregistered"
                 if self.storage is not None:
-                    self.storage.upsert_flight(f)
+                    self.storage.upsert_flight(f)  # sync path (unregister_node is sync)
         del self.nodes[node_id]
         self.radar.nodes.pop(node_id, None)
         self._emit(EventKind.NODE_OFFLINE, node_id=node_id,
@@ -474,7 +492,7 @@ class Tower:
                 return fid
         return None
 
-    def _preempt(self, flight_id: str, reason: str):
+    async def _preempt(self, flight_id: str, reason: str):
         f = self.flights.get(flight_id)
         if not f or f.status != FlightStatus.IN_FLIGHT:
             return
@@ -486,7 +504,7 @@ class Tower:
             node.active_flights = [x for x in node.active_flights if x != flight_id]
             node.active_weights.pop(flight_id, None)
         if self.storage is not None:
-            self.storage.upsert_flight(f)
+            await self._store(self.storage.upsert_flight, f)
         self._emit(EventKind.SHOT_DOWN, node_id=f.assigned_node, flight_id=flight_id,
                    message=f"PREEMPTED {f.callsign}: {reason}", severity="critical")
 
@@ -522,6 +540,11 @@ class Tower:
             "last_heartbeat": datetime.now(timezone.utc),
             "status": "running",
         }
+        if self.storage is not None:
+            try:
+                self.storage.upsert_container(self.containers[container_id])
+            except Exception as e:
+                logger.warning("container persist failed: %s", e)
         return self.containers[container_id]
 
     def heartbeat(self, container_id: str) -> bool:
@@ -529,6 +552,11 @@ class Tower:
             self.register_container(container_id)
         self.containers[container_id]["last_heartbeat"] = datetime.now(timezone.utc)
         self.containers[container_id]["status"] = "running"
+        if self.storage is not None:
+            try:
+                self.storage.upsert_container(self.containers[container_id])
+            except Exception as e:
+                logger.warning("container persist failed: %s", e)
         return True
 
     def stale_containers(self, timeout_s: float = 30.0) -> List[str]:
@@ -547,16 +575,36 @@ class Tower:
             return {}
         return self.anomaly.trend_summary(node)
 
+    # ---------------- persistence helpers ----------------
+    async def _store(self, fn, *args, **kwargs):
+        """Run a storage call off the event loop.
+
+        SQLite calls are blocking. Every write from an async handler goes
+        through a worker thread so the mesh is never stalled by disk I/O.
+        """
+        if self.storage is None:
+            return None
+        try:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+        except Exception as e:
+            logger.warning("storage call failed: %s", e)
+            return None
+
     # ---------------- audit ----------------
     def log_audit(self, payload: Dict[str, Any]) -> Optional[str]:
         if self.storage is None:
             return None
         return self.storage.append_audit(payload)
 
-    def verify_audit(self) -> bool:
+    async def log_audit_async(self, payload: Dict[str, Any]) -> Optional[str]:
+        if self.storage is None:
+            return None
+        return await self._store(self.storage.append_audit, payload)
+
+    async def verify_audit_async(self) -> bool:
         if self.storage is None:
             return True
-        return self.storage.verify_audit_chain()
+        return bool(await self._store(self.storage.verify_audit_chain))
 
     def ingest_telemetry(self, node_id: str, telem: Telemetry) -> bool:
         node = self.nodes.get(node_id)

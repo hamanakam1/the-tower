@@ -46,6 +46,44 @@ def test_storage_round_trips_flights(tmp_path):
     assert any(f.task == "persist me" for f in loaded)
 
 
+def test_migrations_are_recorded_and_idempotent(tmp_path):
+    s = Storage(str(tmp_path / "m.sqlite"))
+    v1 = s.schema_version()
+    assert v1 >= 1
+    # applying again is a no-op
+    assert s.apply_migrations() == 0
+    assert s.schema_version() == v1
+    s.close()
+
+
+def test_flights_persist_scope_and_retries(tmp_path):
+    from the_tower.schemas import Flight, ResourceWeight
+
+    s = Storage(str(tmp_path / "f.sqlite"))
+    f = Flight(task="scoped", scope=["a", "b"], weight=ResourceWeight(cpu_cores=1, memory_gb=1))
+    s.upsert_flight(f)
+    loaded = s.load_flights()
+    s.close()
+    match = [x for x in loaded if x.task == "scoped"]
+    assert match and match[0].scope == ["a", "b"]
+
+
+def test_containers_persist(tmp_path):
+    from datetime import datetime, timezone
+
+    s = Storage(str(tmp_path / "c.sqlite"))
+    s.upsert_container({
+        "container_id": "ctr-1", "flight_id": "flt-1", "node_id": "m3max",
+        "status": "running", "metadata": {"pid": 123},
+        "last_heartbeat": datetime.now(timezone.utc),
+    })
+    loaded = s.load_containers()
+    s.close()
+    assert len(loaded) == 1
+    assert loaded[0]["container_id"] == "ctr-1"
+    assert loaded[0]["metadata"]["pid"] == 123
+
+
 @pytest.mark.asyncio
 async def test_tower_audit_endpoint_accepts_rapid_writes(tmp_path):
     # Regression: the storage connection was bound to the thread that built it,

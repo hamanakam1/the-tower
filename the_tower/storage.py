@@ -47,7 +47,10 @@ CREATE TABLE IF NOT EXISTS flights (
     assigned_node TEXT,
     reason TEXT,
     rogue INTEGER,
-    metadata_json TEXT
+    metadata_json TEXT,
+    scope_json TEXT,
+    retries INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 2
 );
 CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
@@ -88,7 +91,52 @@ CREATE TABLE IF NOT EXISTS audit (
     previous_hash TEXT,
     payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL,
+    note TEXT
+);
 """
+
+# ---------------------------------------------------------------------------
+# Migrations
+#
+# Every schema change ships as an ordered, append-only migration. The
+# database records the highest applied version in `schema_version`; on
+# startup the store applies every migration above the recorded version.
+# Never edit an applied migration — add a new one.
+# ---------------------------------------------------------------------------
+
+MIGRATIONS = [
+    # v1 — baseline schema (the tables created above).
+    (1, "baseline schema", []),
+    # v2 — flights gain scope (resource conflict keys) and retry counters.
+    (2, "flight scope + retry counters", [
+        "ALTER TABLE flights ADD COLUMN scope_json TEXT",
+        "ALTER TABLE flights ADD COLUMN retries INTEGER DEFAULT 0",
+        "ALTER TABLE flights ADD COLUMN max_retries INTEGER DEFAULT 2",
+    ]),
+    # v3 — containers are tracked so the Tower can prove it owns a process
+    # before it sends a signal.
+    (3, "container registry", [
+        """CREATE TABLE IF NOT EXISTS containers (
+               container_id TEXT PRIMARY KEY,
+               flight_id TEXT,
+               node_id TEXT,
+               status TEXT,
+               metadata_json TEXT,
+               last_heartbeat TEXT
+           )""",
+    ]),
+]
+
+
+def _table_columns(conn: sqlite3.Connection, table: str):
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return set()
+    return {r[1] for r in rows}
 
 
 class Storage:
@@ -104,14 +152,64 @@ class Storage:
         self._lock = threading.RLock()
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        # NORMAL keeps the WAL crash-safe against application crashes while
+        # avoiding an fsync on every commit. The Tower is an advisory control
+        # plane: losing the last few telemetry samples to an OS crash is
+        # acceptable, losing the audit chain is not, and the chain is
+        # re-verified on startup.
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        self.apply_migrations()
+
+    # ---- migrations ----
+    def apply_migrations(self) -> int:
+        """Apply every migration above the recorded schema version."""
+        with self._lock:
+            row = self.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            current = row[0] or 0
+            applied = 0
+            for version, note, statements in MIGRATIONS:
+                if version <= current:
+                    continue
+                for stmt in statements:
+                    # make ALTER TABLE idempotent for databases that already
+                    # carry the column (e.g. created from a newer SCHEMA)
+                    if stmt.startswith("ALTER TABLE"):
+                        table, col = stmt.split()[2], stmt.split()[-1]
+                        if col in _table_columns(self.conn, table):
+                            continue
+                    try:
+                        self.conn.execute(stmt)
+                    except sqlite3.OperationalError as e:
+                        if "duplicate column" in str(e).lower():
+                            continue
+                        raise
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO schema_version(version, applied_at, note) VALUES (?,?,?)",
+                    (version, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), note),
+                )
+                self.conn.commit()
+                applied += 1
+            return applied
+
+    def schema_version(self) -> int:
+        with self._lock:
+            row = self.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            return row[0] or 0
 
     # ---- flights ----
     @_serialised
     def upsert_flight(self, f: Flight):
+        # Named columns (not positional) so migrations can add columns
+        # without breaking this statement.
         self.conn.execute(
-            """INSERT INTO flights VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO flights
+               (id, callsign, task, requester, priority, weight_json, container_id,
+                preferred_node, status, submitted_at, cleared_at, takeoff_at, landed_at,
+                shot_down_at, assigned_node, reason, rogue, metadata_json, scope_json,
+                retries, max_retries)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                callsign=excluded.callsign, task=excluded.task, requester=excluded.requester,
                priority=excluded.priority, weight_json=excluded.weight_json,
@@ -120,7 +218,9 @@ class Storage:
                cleared_at=excluded.cleared_at, takeoff_at=excluded.takeoff_at,
                landed_at=excluded.landed_at, shot_down_at=excluded.shot_down_at,
                assigned_node=excluded.assigned_node, reason=excluded.reason,
-               rogue=excluded.rogue, metadata_json=excluded.metadata_json""",
+               rogue=excluded.rogue, metadata_json=excluded.metadata_json,
+               scope_json=excluded.scope_json, retries=excluded.retries,
+               max_retries=excluded.max_retries""",
             (
                 f.id, f.callsign, f.task, f.requester, int(f.priority), f.weight.model_dump_json(),
                 f.container_id, f.preferred_node, f.status.value,
@@ -129,6 +229,7 @@ class Storage:
                 f.landed_at.isoformat() if f.landed_at else None,
                 f.shot_down_at.isoformat() if f.shot_down_at else None,
                 f.assigned_node, f.reason, 1 if f.rogue else 0, json.dumps(f.metadata),
+                json.dumps(f.scope), f.retries, f.max_retries,
             ),
         )
         self.conn.commit()
@@ -171,6 +272,9 @@ class Storage:
                 reason=r["reason"] or "",
                 rogue=bool(r["rogue"]),
                 metadata=json.loads(r["metadata_json"]) if r["metadata_json"] else {},
+                scope=json.loads(r["scope_json"]) if r["scope_json"] else [],
+                retries=r["retries"] or 0,
+                max_retries=r["max_retries"] if r["max_retries"] is not None else 2,
             )
             out.append(f)
         return out
@@ -236,6 +340,39 @@ class Storage:
                 battery_percent=r["battery_percent"], solar_input_watts=r["solar_input_watts"],
             ))
         out.reverse()
+        return out
+
+    # ---- containers ----
+    @_serialised
+    def upsert_container(self, info: Dict[str, Any]):
+        self.conn.execute(
+            """INSERT INTO containers
+               (container_id, flight_id, node_id, status, metadata_json, last_heartbeat)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(container_id) DO UPDATE SET
+               flight_id=excluded.flight_id, node_id=excluded.node_id,
+               status=excluded.status, metadata_json=excluded.metadata_json,
+               last_heartbeat=excluded.last_heartbeat""",
+            (info["container_id"], info.get("flight_id"), info.get("node_id"),
+             info.get("status", "running"), json.dumps(info.get("metadata", {})),
+             info["last_heartbeat"].isoformat() if hasattr(info.get("last_heartbeat"), "isoformat")
+             else info.get("last_heartbeat")),
+        )
+        self.conn.commit()
+
+    @_serialised
+    def load_containers(self) -> List[Dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM containers").fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                "container_id": r["container_id"],
+                "flight_id": r["flight_id"],
+                "node_id": r["node_id"],
+                "status": r["status"] or "running",
+                "metadata": json.loads(r["metadata_json"]) if r["metadata_json"] else {},
+                "last_heartbeat": r["last_heartbeat"],
+            })
         return out
 
     # ---- nodes ----

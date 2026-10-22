@@ -189,7 +189,7 @@
 </div>
 
 <footer>
-  <div>The Tower v0.2.0 · Hardware ATC · <span id="clock"></span></div>
+  <div>The Tower <span id="version">v-</span> · Hardware ATC · <span id="clock"></span></div>
   <div class="legend">
     <span><span class="dot" style="background:var(--green)"></span>Cleared</span>
     <span><span class="dot" style="background:var(--amber)"></span>Queued</span>
@@ -427,6 +427,11 @@ try {
 
 function tickClock(){ document.getElementById("clock").textContent = new Date().toLocaleTimeString(); }
 setInterval(tickClock,1000); tickClock();
+
+fetchJSON("/health").then(h => {
+  const el = document.getElementById("version");
+  if (el && h && h.version) el.textContent = "v" + h.version;
+}).catch(()=>{});
 </script>
 </body>
 </html>

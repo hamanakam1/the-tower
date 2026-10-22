@@ -22,6 +22,11 @@ from .schemas import (
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _version() -> str:
+    from . import __version__
+    return __version__
+
+
 def _container_json(info):
     out = dict(info)
     hb = out.get("last_heartbeat")
@@ -85,7 +90,7 @@ class TowerServer:
             return JSONResponse({
                 "status": "ok",
                 "service": "the-tower",
-                "version": "0.3.0",
+                "version": _version(),
                 "nodes": len(tower.nodes),
                 "flights": len(tower.flights),
                 "uptime_s": uptime,
@@ -205,11 +210,11 @@ class TowerServer:
             return JSONResponse({"ok": True})
 
         async def audit_verify(request):
-            return JSONResponse({"valid": tower.verify_audit()})
+            return JSONResponse({"valid": await tower.verify_audit_async()})
 
         async def audit_log(request):
             body = await request.json()
-            aid = tower.log_audit(body)
+            aid = await tower.log_audit_async(body)
             return JSONResponse({"audit_id": aid})
 
         async def node_history(request):
