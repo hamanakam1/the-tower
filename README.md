@@ -68,7 +68,7 @@ thermals, memory and power of each machine in the mesh.
     <td width="50%"><img alt="the event log, the audit trail of every clearance decision" src="docs/screenshots/event-log.png"><br><sub><b>event log</b> &mdash; every clearance request, denial and kill, in the order it happened. This is the record you read after something goes wrong.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img alt="the anti-air battery, the hard kill-switch" src="docs/screenshots/anti-air-battery.png"><br><sub><b>anti-air battery</b> &mdash; the hard kill. Name a container and it dies; no approval, no grace period.</sub></td>
+    <td width="50%"><img alt="the anti-air battery, the kill console" src="docs/screenshots/anti-air-battery.png"><br><sub><b>anti-air battery</b> &mdash; the kill console. It needs a reason, it only stops processes the Tower was given ownership of, and it can give a flight a grace period to land first.</sub></td>
     <td width="50%"><img alt="the trends panel, tracking thermal slope and the power redline" src="docs/screenshots/trends.png"><br><sub><b>trends</b> &mdash; thermal slope and memory slope per node, and the estimated time to the power redline. A node that is trending to failure gets warned about before it fails.</sub></td>
   </tr>
   <tr>
@@ -104,7 +104,9 @@ same console on a narrow viewport:
 - **Node Lifecycle** - `online → draining → cordoned → maintenance → offline → unknown`
 - **Flight Clearance** - Dynamic dispatch algorithm based on resource weight and node scoring
 - **Anomaly Radar** - Predictive ML on thermal/memory/power trends (linear regression + z-score spikes)
-- **Anti-Air Battery** - Hard-kill switch for runaway processes and stale containers; a kill requires a reason, only touches processes the Tower owns, and drains the node first
+- **Anti-Air Battery** - Kill console for runaway processes and stale containers; a kill requires a reason, only ever signals a process the Tower was given ownership of, and can give a flight a grace period to land before it is terminated
+- **Process Ownership** - The Tower keeps an explicit registry of the PIDs it may stop; a container id that merely looks like a PID is never treated as one
+- **Draining** - A flight given a grace period enters `draining`, keeps its claim on the node, lands if it finishes in time and is terminated when the deadline passes
 - **Scope Conflicts** - Resource-key conflict detection with priority preemption
 - **Priority Dispatch Queue** - Queued flights re-dispatched when capacity frees
 - **Container Registry** - Heartbeat-based liveness with auto-kill on timeout
@@ -208,9 +210,11 @@ Working prototype - hardware ATC with telemetry, clearance dispatch, anomaly det
 nodes are still simulated, and macOS exposes no CPU thermal sensor through
 `psutil` — the local node's temperature is an estimate from CPU load, and the
 dashboard says so on every sample. The kill path only signals processes the
-Tower has registered, and the audit chain records admission decisions. The
+Tower has been given ownership of, a kill needs a reason, and the audit chain
+records admission decisions. The
 [long-term plan](docs/roadmap.md) lists every remaining gap with the horizon
-that closes it.
+that closes it, and the guarantees that now hold are listed
+[there](docs/roadmap.md#the-guarantees-that-now-hold).
 
 ## License
 

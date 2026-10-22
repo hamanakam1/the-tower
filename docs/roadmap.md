@@ -1,6 +1,6 @@
 # The Tower — Long-Term Plan
 
-**Status:** living document · last reviewed 2026-10-22 · against `v0.3.0` (`5b05300`)
+**Status:** living document · last reviewed 2026-10-22 · against `v0.4.0` (`6853d22` + the kill-authority, forecast and idempotency fixes)
 
 This is the build plan for The Tower: what it is, how it should be engineered,
 what the next three years look like, and what must be true before each phase
@@ -63,43 +63,42 @@ sits between the two:
 
 ---
 
-## 2. Where we are: an honest read of `v0.3.0`
+## 2. Where we are: an honest read of `v0.4.0`
 
-The Tower is a working prototype with a genuinely good skeleton. Roughly
-2,800 lines of Python, 31 passing tests, a live dashboard, SQLite persistence,
-WebSocket push, Prometheus metrics, a telemetry agent, and a CI workflow.
-The bones are right: a clear domain model (`schemas.py`), a clear engine
-(`core.py`), a thin HTTP layer (`server.py`), and a persistence boundary
-(`storage.py`).
+The Tower started as a working prototype with a genuinely good skeleton: a
+clear domain model (`schemas.py`), a clear engine (`core.py`), a thin HTTP
+layer (`server.py`), and a persistence boundary (`storage.py`). Horizon 0 is
+now closed and the shape has changed underneath it — the admission decision
+is pure, the safety ladder is graded, nodes have leases and lifecycle
+states, and the ledger records what was decided.
 
-The honest problem is that **most of the mesh is still fiction**.
+What has not changed is the shape of the problem: **most of the mesh is still
+fiction.** The default fleet is three synthetic nodes, and the only node that
+reports anything real reports a temperature it guessed.
 
 ### What is real today
 
 | Area | Reality | Evidence |
 |---|---|---|
-| Engine | Real admission logic: capacity check, node scoring, priority queue, scope-conflict preemption, redline auto-kill, retry on redline | `the_tower/core.py` |
-| Persistence | SQLite in WAL mode: flights, events, telemetry, node specs, hash-chained audit | `the_tower/storage.py` |
-| Local telemetry | Real `psutil` CPU/memory/load on the host, with a load-derived temperature estimate as fallback | `the_tower/radar.py:81` |
-| Transport | Starlette HTTP + WebSocket; optional bearer token; optional per-IP rate limit | `the_tower/server.py` |
-| Dashboard | Single-file HTML/CSS/JS; canvas radar; live flight board; kill console | `the_tower/static/index.html` |
+| Decision core | A pure `decide(flight, snapshot)` over a frozen mesh snapshot, separate from the effects that follow | `the_tower/policy.py` |
+| Safety | A graded ladder — admit, warn, throttle, drain, kill — with per-node advisory or enforce mode | `the_tower/safety.py` |
+| Engine | Capacity checks, node scoring, priority queue, scope preemption, leases with renewal and expiry, redline handling | `the_tower/core.py` |
+| Persistence | SQLite in WAL mode with numbered migrations and rollbacks: flights, events, telemetry, containers, nodes, hash-chained audit | `the_tower/storage.py` |
+| Explainability | Every decision carries the scores it considered and the node state it decided against, and can be replayed later | `the_tower/replay.py`, `POST /replay` |
+| Local telemetry | Real `psutil` CPU/memory/load on the host, with a labelled estimate where no sensor exists | `the_tower/sensors.py` |
+| Transport | Starlette HTTP + WebSocket; optional bearer token; optional per-IP rate limit; CORS is an allowlist | `the_tower/server.py` |
+| Dashboard | Single-file HTML/CSS/JS; canvas radar; live flight board; leases panel; safety ladder; kill console | `the_tower/static/index.html` |
 | Ops | Dockerfile, Makefile, CI on push/PR, `.env.example`, Prometheus `/metrics` | repo root |
 
-### What is simulated or unreachable today
+### What is still simulated or unreachable
 
 | Area | Reality | Impact |
 |---|---|---|
-| Multi-node telemetry | `radar.py:76` hardcodes `if nid == "m3max"`. **Every other node id returns synthetic sine-wave telemetry.** | The Pi cluster and trailer are decorative. A real Pi registering as `pi-01` is still simulated. |
-| Scope conflicts | The shorthand clearance body used by the dashboard and `the-tower demo` never forwards `scope` (`server.py:108-125`), so `Flight.scope` is always empty and preemption never triggers through the normal path. | A headline feature is unreachable in practice. |
-| Temperature | On macOS `psutil.sensors_temperatures()` is usually empty, so temperature is an estimate from CPU load (`radar.py:99`). | "Thermal ATC" is really "CPU-load ATC". |
-| Kill authority | `core.py:379-384` will `os.kill(pid, SIGKILL)` any numeric `container_id` with no check that the Tower owns that process. | One stray request can kill an unrelated PID. |
-| Config | `config.example.yaml` documents `token:`; the code only reads `TOWER_TOKEN` from the environment (`server.py:273`). `TOWER_DB_PATH` in the Dockerfile is never read. | Documented configuration silently does nothing. |
-| Versions | `pyproject.toml`, `__init__.py` and `/health` now agree on `0.3.0`, but the dashboard footer still hardcodes `v0.2.0` (`static/index.html:192`) and nothing reads `__version__`. | The running version is still not discoverable from one place. |
-| Event stream | `/audit` is only written when a client explicitly posts to it. Clearance and kill decisions are **not** recorded in the audit chain. | The "immutable audit ledger" does not actually audit the decisions that matter. |
-| Async storage | `storage.py` uses a synchronous `sqlite3` connection, called directly from `async` handlers. | The event loop blocks on disk I/O as the mesh grows. |
-| Thread affinity | The SQLite connection was bound to the thread that constructed the Tower, so serving it from another thread (uvicorn workers, an embedding app, the test client) raised `SQLite objects created in a thread can only be used in that same thread`. | Any deployment that does not run the Tower and the app on the same thread would have failed at the first write. |
-| Schema | `SCHEMA` is applied with `CREATE TABLE IF NOT EXISTS`. There is no migration mechanism. | The first real schema change is a breaking upgrade with no rollback. |
-| Scaling | `scope_conflict` and `_dispatch_queued` scan all flights linearly on every sweep; `_buckets` in the rate limiter grows without bound. | Behaviour is fine at three nodes and degrades at thirty. |
+| Multi-node telemetry | Nodes declare a sampler. `simulated` is still the default for anything that is not this machine, and `agent` only works once an agent is actually running on the node. | The Pi cluster and trailer are decorative until real hardware is attached. |
+| Temperature | macOS exposes no CPU thermal sensor to an unprivileged process, so the local node's temperature is an estimate from CPU load. It is labelled `estimated` wherever it is shown. | "Thermal ATC" is still "CPU-load ATC" on the local machine. |
+| Enforcement | Advisory is the default and per-node enforcement is an opt-in flag. | Correct for now, but it means the Tower will not stop a runaway on its own until someone opts in. |
+| Scale | The scope index and the queued-flight index keep the common paths proportional, but the mesh is one process on one machine with one SQLite file. | Horizon 4 is a rewrite, not a tuning exercise. |
+| Rollups | Telemetry rolls up into buckets, but there is no cross-node query layer. | Answering "what did the whole mesh do last Tuesday" means reading the store by hand. |
 
 ### Defects found and fixed while writing this plan
 
@@ -118,10 +117,31 @@ The honest problem is that **most of the mesh is still fiction**.
   `ProgrammingError` on the first write in a multi-threaded deployment. The
   connection is now explicitly shared (`check_same_thread=False`) and every
   storage operation is serialised through one lock.
+- `core.py` — the kill path treated a registered container whose id happened
+  to be all digits as a process id and sent it `SIGKILL`. The Tower now keeps
+  an explicit registry of the PIDs it owns and signals nothing else; PID 0
+  and 1 are never claimed, and ownership survives a restart.
+- `core.py` — `drain_timeout_s` was accepted by the API and then ignored:
+  "drain before kill" stopped new flights being admitted and killed the
+  flight immediately, so nothing ever got the chance to land. A kill with a
+  grace period now puts the flight into a DRAINING state with a persisted
+  deadline.
+- `anomaly.py` — the thermal regression assumed five seconds between
+  samples, but the sweep interval is configurable. On a tower running with
+  `--interval 2` the time-to-redline prediction was two and a half times too
+  optimistic, and that prediction is what decides whether a node is drained.
+  The regression now runs against the real sample timestamps.
+- `server.py` — the v2 clearance contract promised that a retried request
+  never schedules the work twice, but the answer was kept only in an
+  in-memory cache. A retry that arrived after a restart scheduled a second
+  flight. The key and the answer are now persisted with the flight.
 
 > These fixes are in this branch (except the dependency declaration, which
 > landed in the `v0.3.0` tag), with regression tests in
-> [`tests/test_storage.py`](../tests/test_storage.py). The rest are
+> [`tests/test_storage.py`](../tests/test_storage.py),
+> [`tests/test_kill_authority.py`](../tests/test_kill_authority.py),
+> [`tests/test_anomaly.py`](../tests/test_anomaly.py) and
+> [`tests/test_idempotency.py`](../tests/test_idempotency.py). The rest are
 > scheduled in Horizon 0.
 
 ### Horizon 0 progress
@@ -136,19 +156,37 @@ what was intended.
 | 0.2 | Config parity | **done** | `the_tower/config.py`; every documented key has a test in `tests/test_config.py` |
 | 0.3 | Shorthand clearance keeps `scope`, `weight.gpu_units`, `constraints` | **done** | `server.py`; covered by `tests/test_server.py` |
 | 0.4 | Pluggable sampler per node | **done** | `the_tower/sensors.py`, `NodeSpec.sampler` (`local` / `simulated` / `agent`) |
-| 0.5 | Kill guard: owned PIDs only, reason required, drain first | **done** | `core.py::kill`; `NodeStatus.DRAINING` |
+| 0.5 | Kill guard: owned PIDs only, reason required, drain first | **done** | `core.py::kill`; `NodeStatus.DRAINING`; an explicit PID ownership registry |
 | 0.6 | Audit every decision | **done** | clearance, queue, preempt, kill, drain, node state, enforcement change |
 | 0.7 | SQLite migrations (numbered, forward, with rollback) | **done** | `the_tower/storage.py::MIGRATIONS` and `ROLLBACKS` |
 | 0.8 | Telemetry retention and rollup | **done** | `storage.py::rollup_telemetry`; 1m → 5m → 1h → 1d buckets |
 | 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
 | 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
 | 0.11 | Bounded rate-limit buckets, CORS allowlist | **done** | `server.py`; `TOWER_CORS_ORIGINS`, no wildcard default |
-| 0.12 | Fill the test gaps | **done** | 101 tests across policy, safety, replay, config, sensors, storage, server |
+| 0.12 | Fill the test gaps | **done** | 136 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority and idempotency |
 | — | Graded safety ladder (§3.2) | **done** | `the_tower/safety.py`: admit → warn → throttle → drain → kill |
 | — | Pure decision core (§3.1) | **done** | `the_tower/policy.py`; the Tower drives it with a frozen snapshot |
 | — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`; the Tower recommends instead of acting |
 | — | Decision replay (§3.1) | **done** | `the_tower/replay.py`; `POST /replay`, `GET /decisions` |
 | — | Node lifecycle states | **done** | draining / cordoned / maintenance / offline / unknown |
+| — | Leases | **done** | `core.py::issue_lease`; renewal, expiry and automatic rescheduling |
+
+### The guarantees that now hold
+
+These are the properties a reader should be able to check the code against.
+Each one has a test.
+
+| Guarantee | Where it is enforced | Test |
+|---|---|---|
+| The Tower never signals a process it was not given | `core.py::_owned_pid_for` | `tests/test_kill_authority.py` |
+| A numeric container id is never a licence to kill that pid | `core.py::_owned_pid_for` | `tests/test_kill_authority.py` |
+| A kill needs a reason | `core.py::kill` | `tests/test_kill_authority.py` |
+| A flight given a grace period lands, or is terminated at the deadline | `core.py::_progress_flights` | `tests/test_kill_authority.py` |
+| A node with stale telemetry is `unknown` and is never scheduled onto | `policy.py::NodeView.accepts` | `tests/test_server.py` |
+| The time-to-redline forecast does not depend on the sweep interval | `anomaly.py::time_axis` | `tests/test_anomaly.py` |
+| A retried clearance request never schedules the work twice, even across a restart | `server.py::clearance_v2` | `tests/test_idempotency.py` |
+| Every decision is in the hash-chained ledger | `core.py::_emit`, `storage.py::append_audit` | `tests/test_storage.py` |
+| A schema change ships with a forward migration and a rollback | `storage.py::MIGRATIONS`, `ROLLBACKS` | `tests/test_storage.py` |
 
 **Still open in Horizon 0:** a real macOS CPU thermal sensor (the platform
 exposes none to unprivileged processes, so the local node's temperature is a
