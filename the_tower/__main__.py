@@ -20,6 +20,8 @@ def build_parser():
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--interval", type=float, default=5.0, help="Radar sweep interval seconds")
+    serve.add_argument("--db", default=None, help="SQLite db path")
+    serve.add_argument("--config", default=None, help="YAML config file")
 
     radar = sub.add_parser("radar", help="Print one radar sweep and exit")
     status = sub.add_parser("status", help="Print node status")
@@ -32,7 +34,21 @@ def build_parser():
 
 
 async def cmd_serve(args):
-    tower = Tower(radar_interval_s=args.interval)
+    import yaml
+    db_path = args.db
+    interval = args.interval
+    nodes = None
+    if args.config and Path(args.config).exists():
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f) or {}
+        db_path = cfg.get("db_path", db_path)
+        interval = cfg.get("radar_interval", interval)
+        if cfg.get("nodes"):
+            from .schemas import NodeSpec
+            nodes = [NodeSpec(**n) for n in cfg["nodes"]]
+    if db_path is None:
+        db_path = str(Path.home() / ".the-tower" / "tower.sqlite")
+    tower = Tower(nodes=nodes, radar_interval_s=interval, db_path=db_path)
     await tower.start()
     srv = TowerServer(tower)
     # run uvicorn in same loop

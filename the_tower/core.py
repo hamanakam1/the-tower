@@ -135,6 +135,7 @@ class Tower:
                     await self._auto_kill_on_redline(nid)
         # update flight statuses: in-flight flights may land randomly-ish based on duration
         await self._progress_flights()
+        await self._dispatch_queued()
 
     async def _auto_kill_on_redline(self, node_id: str):
         node = self.nodes.get(node_id)
@@ -173,6 +174,19 @@ class Tower:
                     self._emit(EventKind.LANDING, node_id=flight.assigned_node, flight_id=fid,
                                message=f"{flight.callsign} landed on {flight.assigned_node}",
                                severity="info")
+
+    async def _dispatch_queued(self):
+        queued = sorted(
+            [f for f in self.flights.values() if f.status == FlightStatus.QUEUED],
+            key=lambda f: (int(f.priority), f.submitted_at),
+        )
+        for f in queued:
+            if f.status != FlightStatus.QUEUED:
+                continue
+            try:
+                await self.request_clearance(ClearanceRequest(flight=f))
+            except Exception as e:
+                print(f"dispatch error: {e}")
 
     # ---------------- clearance ----------------
     async def request_clearance(self, req: ClearanceRequest) -> ClearanceResponse:
@@ -312,6 +326,7 @@ class Tower:
 
     # ---------------- kill ----------------
     async def kill(self, req: KillRequest) -> KillResponse:
+        response = None
         async with self._lock:
             # find flight by container
             flight_id = self._killed_containers.get(req.container_id)
@@ -352,13 +367,15 @@ class Tower:
                        container_id=req.container_id,
                        message=f"KILL executed: {req.container_id} ({req.reason})",
                        severity="critical")
-            return KillResponse(
+            response = KillResponse(
                 success=True,
                 container_id=req.container_id,
                 flight_id=flight_id,
                 node_id=node_id,
                 message=f"Killed {req.container_id}" + (" (proc terminated)" if killed_proc else ""),
             )
+        await self._dispatch_queued()
+        return response
 
     # ---------------- queries ----------------
     def get_node(self, node_id: str) -> Optional[Node]:
