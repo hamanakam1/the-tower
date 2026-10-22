@@ -22,6 +22,14 @@ from .schemas import (
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _container_json(info):
+    out = dict(info)
+    hb = out.get("last_heartbeat")
+    if hasattr(hb, "isoformat"):
+        out["last_heartbeat"] = hb.isoformat()
+    return out
+
+
 class TowerServer:
     def __init__(self, tower: Tower):
         self.tower = tower
@@ -186,7 +194,7 @@ class TowerServer:
             if not cid:
                 return JSONResponse({"error": "container_id required"}, status_code=400)
             info = tower.register_container(cid, body.get("flight_id"), body.get("node_id"), body.get("metadata"))
-            return JSONResponse({"ok": True, "container": info})
+            return JSONResponse({"ok": True, "container": _container_json(info)})
 
         async def heartbeat(request):
             cid = request.path_params["container_id"]
@@ -194,7 +202,7 @@ class TowerServer:
             return JSONResponse({"ok": True})
 
         async def list_containers(request):
-            return JSONResponse({"containers": list(tower.containers.values())})
+            return JSONResponse({"containers": [_container_json(c) for c in tower.containers.values()]})
 
         routes = [
             Route("/", root),

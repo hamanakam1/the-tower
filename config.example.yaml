@@ -1,0 +1,47 @@
+# The Tower configuration
+db_path: ~/.the-tower/tower.sqlite
+radar_interval: 5.0
+# auth token (optional). If set, mutating endpoints require
+# Authorization: Bearer <token>
+# token: change-me
+
+nodes:
+  - id: m3max
+    name: M3 Max
+    role: Heavy Bomber
+    specs: 128GB Unified Memory, Apple Silicon
+    constraints: Thermal throttling under sustained load
+    cpu_cores: 16.0
+    memory_gb: 128.0
+    gpu_units: 40.0
+    redline_temp_c: 95.0
+    max_power_watts: 100.0
+    network_capacity_mbps: 10000.0
+    thermal_mass: 4.0
+    location: local
+  - id: pi-cluster
+    name: Raspberry Pi 5 Cluster
+    role: Drone Swarm
+    specs: Multiple nodes, 8GB each
+    constraints: 80C redline, limited RAM/power
+    cpu_cores: 16.0
+    memory_gb: 32.0
+    gpu_units: 0.0
+    redline_temp_c: 80.0
+    max_power_watts: 60.0
+    network_capacity_mbps: 1000.0
+    thermal_mass: 1.2
+    location: edge
+  - id: trailer-hpc
+    name: Mobile HPC Trailer
+    role: Off-grid Compute
+    specs: Solar + battery banks
+    constraints: Constrained by SoC/battery discharge
+    cpu_cores: 8.0
+    memory_gb: 64.0
+    gpu_units: 8.0
+    redline_temp_c: 85.0
+    max_power_watts: 300.0
+    network_capacity_mbps: 500.0
+    thermal_mass: 3.0
+    location: off-grid

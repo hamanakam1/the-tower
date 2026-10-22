@@ -66,3 +66,29 @@ def test_root_dashboard(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "THE TOWER" in r.text
+
+
+def test_register_container(client):
+    r = client.post("/containers", json={"container_id": "c-1", "node_id": "m3max"})
+    assert r.status_code == 200
+    r2 = client.post("/containers/c-1/heartbeat")
+    assert r2.status_code == 200
+    r3 = client.get("/containers")
+    assert r3.status_code == 200
+    assert len(r3.json()["containers"]) >= 1
+
+
+def test_register_node_endpoint(client):
+    spec = {"id":"n2","name":"N2","role":"test","specs":"x","constraints":"y",
+            "cpu_cores":2,"memory_gb":4,"redline_temp_c":90,"max_power_watts":30,
+            "network_capacity_mbps":100}
+    r = client.post("/nodes", json=spec)
+    assert r.status_code == 200
+    r2 = client.delete("/nodes/n2")
+    assert r2.status_code == 200
+
+
+def test_audit_verify(client):
+    r = client.get("/audit/verify")
+    assert r.status_code == 200
+    assert "valid" in r.json()
