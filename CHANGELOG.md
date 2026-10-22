@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+- Fix audit id collision: `audit-<epoch-ms>` raised `UNIQUE constraint failed` on two entries in the same millisecond; now `audit-<epoch-ns>`
+- Fix audit chain ordering: second-resolution timestamps were ambiguous; the chain now follows insertion order
+- Fix storage thread affinity: the SQLite connection was bound to the constructing thread and raised `ProgrammingError` on any write from another thread; the connection is now shared under a lock
+- Declare `websockets`, `httpx` and `pyyaml` as runtime dependencies — a clean install previously answered the `/ws` handshake with 404 and live push was silently dead
+- Add regression tests for the audit chain and storage thread safety
+- Add the long-term build plan (`docs/roadmap.md`), the proposed target architecture diagram (`docs/architecture/`) and dashboard screenshots (`docs/screenshots/`)
+
 ## 0.3.0
 - Prometheus `/metrics` endpoint
 - Flight detail endpoint with related events

@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "The Tower — Proposed Target Architecture (v1.0)",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "admission-path",
+        "label": "Admission path",
+        "focus": ["console", "api", "policy", "scheduler", "sim", "agents"],
+        "note": "Follow one clearance request from the operator console to the node agent."
+      },
+      {
+        "id": "safety-authority",
+        "label": "Safety authority",
+        "focus": ["battery", "agents", "ledger", "edgerecord"],
+        "note": "Graded stop authority and the tamper-evident record it writes."
+      },
+      {
+        "id": "observed-state",
+        "label": "Observed state",
+        "focus": ["telemetry", "policy", "scheduler"],
+        "note": "Node state feeds the policy engine and the scheduler."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "console",
+      "type": "frontend",
+      "label": "Tower Console",
+      "sublabel": "web UI + WebSocket",
+      "pos": [40, 210],
+      "size": [125, 62]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Admission API",
+      "sublabel": "POST /clearance v2",
+      "pos": [255, 210],
+      "size": [125, 62]
+    },
+    {
+      "id": "policy",
+      "type": "security",
+      "label": "Policy Engine",
+      "sublabel": "thermal / power / SoC",
+      "pos": [470, 210],
+      "size": [125, 62]
+    },
+    {
+      "id": "scheduler",
+      "type": "backend",
+      "label": "Scheduler",
+      "sublabel": "admission scoring",
+      "pos": [685, 210],
+      "size": [125, 62]
+    },
+    {
+      "id": "sim",
+      "type": "backend",
+      "label": "Digital Twin",
+      "sublabel": "placement projection",
+      "pos": [900, 210],
+      "size": [125, 62]
+    },
+    {
+      "id": "agents",
+      "type": "backend",
+      "label": "Node Agents",
+      "sublabel": "one per mesh node",
+      "pos": [1115, 210],
+      "size": [125, 62]
+    },
+    {
+      "id": "battery",
+      "type": "security",
+      "label": "Anti-Air Battery",
+      "sublabel": "graded stop authority",
+      "pos": [1115, 40],
+      "size": [125, 62]
+    },
+    {
+      "id": "telemetry",
+      "type": "database",
+      "label": "Telemetry Store",
+      "sublabel": "SQLite then Timescale",
+      "pos": [470, 370],
+      "size": [125, 62]
+    },
+    {
+      "id": "ledger",
+      "type": "database",
+      "label": "Decision Ledger",
+      "sublabel": "hash-chained records",
+      "pos": [685, 370],
+      "size": [125, 62]
+    },
+    {
+      "id": "edgerecord",
+      "type": "external",
+      "label": "EdgeRecord",
+      "sublabel": "immutable audit sink",
+      "pos": [900, 370],
+      "size": [125, 62]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Node Mesh",
+      "wraps": ["agents"]
+    },
+    {
+      "kind": "region",
+      "label": "Tamper-Evident Audit",
+      "wraps": ["ledger", "edgerecord"]
+    }
+  ],
+  "connections": [
+    { "id": "console-to-api", "from": "console", "to": "api", "label": "clearance" },
+    { "id": "api-to-policy", "from": "api", "to": "policy", "label": "evaluate" },
+    { "id": "policy-to-scheduler", "from": "policy", "to": "scheduler", "label": "admit" },
+    { "id": "scheduler-to-sim", "from": "scheduler", "to": "sim", "label": "project" },
+    { "id": "sim-to-agents", "from": "sim", "to": "agents", "label": "cleared" },
+    { "id": "scheduler-to-ledger", "from": "scheduler", "to": "ledger", "label": "decision record", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "ledger-to-edgerecord", "from": "ledger", "to": "edgerecord", "label": "export" },
+    { "id": "telemetry-to-policy", "from": "telemetry", "to": "policy", "label": "node state", "fromSide": "top", "toSide": "bottom" },
+    { "id": "agents-to-telemetry", "from": "agents", "to": "telemetry", "label": "telemetry stream", "fromSide": "bottom", "toSide": "bottom" },
+    { "id": "battery-to-agents", "from": "battery", "to": "agents", "label": "graded stop", "fromSide": "bottom", "toSide": "top", "labelDy": 24 }
+  ],
+  "cards": [
+    {
+      "dot": "slate",
+      "title": "Today — v0.3.0, implemented",
+      "items": [
+        "One process: engine, API and dashboard",
+        "SQLite WAL store with a hash-chained audit",
+        "Only the local node reports real telemetry",
+        "Read from the_tower sources at 5b05300"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Target — v1.0, proposed",
+      "items": [
+        "Idempotent clearance with expiring leases",
+        "Declarative thermal, power and SoC policy",
+        "Digital Twin projects each placement first"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Safety authority",
+      "items": [
+        "Graded stop: warn, throttle, then kill",
+        "Drain before kill so a flight can reschedule",
+        "Signed export to the EdgeRecord ledger"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Failure posture",
+      "items": [
+        "Unknown telemetry means nothing is scheduled",
+        "A lost agent degrades one node, not the plane",
+        "Advisory by default, enforcement is opt-in"
+      ]
+    }
+  ]
+}

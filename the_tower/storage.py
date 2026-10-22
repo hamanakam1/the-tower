@@ -6,13 +6,26 @@ no db_path is provided.
 """
 from __future__ import annotations
 
+import functools
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .schemas import Flight, TowerEvent, Telemetry
+
+
+def _serialised(fn):
+    """Serialise a storage operation against the shared SQLite connection."""
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+
+    return wrapper
 
 
 SCHEMA = """
@@ -82,14 +95,20 @@ class Storage:
     def __init__(self, db_path: str):
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
+        # The Tower may be constructed on one thread and served on another
+        # (uvicorn workers, an embedding app, the test client). SQLite forbids
+        # crossing threads by default, so the connection is shared explicitly
+        # and every access is serialised through one lock.
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
         self.conn.commit()
 
     # ---- flights ----
+    @_serialised
     def upsert_flight(self, f: Flight):
         self.conn.execute(
             """INSERT INTO flights VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -114,6 +133,7 @@ class Storage:
         )
         self.conn.commit()
 
+    @_serialised
     def load_flights(self) -> List[Flight]:
         rows = self.conn.execute("SELECT * FROM flights").fetchall()
         out = []
@@ -141,11 +161,13 @@ class Storage:
             out.append(f)
         return out
 
+    @_serialised
     def delete_flight(self, flight_id: str):
         self.conn.execute("DELETE FROM flights WHERE id=?", (flight_id,))
         self.conn.commit()
 
     # ---- events ----
+    @_serialised
     def append_event(self, e: TowerEvent):
         self.conn.execute(
             "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?,?,?)",
@@ -154,6 +176,7 @@ class Storage:
         )
         self.conn.commit()
 
+    @_serialised
     def load_events(self, limit: int = 500) -> List[TowerEvent]:
         rows = self.conn.execute(
             "SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (limit,)
@@ -170,6 +193,7 @@ class Storage:
         return out
 
     # ---- telemetry ----
+    @_serialised
     def append_telemetry(self, t: Telemetry):
         self.conn.execute(
             """INSERT INTO telemetry VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -180,6 +204,7 @@ class Storage:
         )
         self.conn.commit()
 
+    @_serialised
     def load_telemetry(self, node_id: str, limit: int = 60) -> List[Telemetry]:
         rows = self.conn.execute(
             "SELECT * FROM telemetry WHERE node_id=? ORDER BY timestamp DESC LIMIT ?",
@@ -200,6 +225,7 @@ class Storage:
         return out
 
     # ---- nodes ----
+    @_serialised
     def upsert_node_spec(self, node_id: str, spec_json: str):
         self.conn.execute(
             "INSERT INTO nodes(id, spec_json) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET spec_json=excluded.spec_json",
@@ -207,21 +233,23 @@ class Storage:
         )
         self.conn.commit()
 
+    @_serialised
     def load_node_specs(self) -> Dict[str, str]:
         rows = self.conn.execute("SELECT id, spec_json FROM nodes").fetchall()
         return {r["id"]: r["spec_json"] for r in rows}
 
     # ---- audit hash chain ----
+    @_serialised
     def append_audit(self, payload: Dict[str, Any]) -> str:
         import hashlib
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         content = json.dumps(payload, sort_keys=True)
         h = hashlib.sha256(content.encode()).hexdigest()
         row = self.conn.execute(
-            "SELECT content_hash FROM audit ORDER BY timestamp DESC LIMIT 1"
+            "SELECT content_hash FROM audit ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
         prev = row["content_hash"] if row else None
-        aid = f"audit-{int(time.time()*1000)}"
+        aid = f"audit-{time.time_ns()}"
         self.conn.execute(
             "INSERT INTO audit VALUES (?,?,?,?,?)",
             (aid, ts, h, prev, content),
@@ -229,9 +257,10 @@ class Storage:
         self.conn.commit()
         return aid
 
+    @_serialised
     def verify_audit_chain(self) -> bool:
         rows = self.conn.execute(
-            "SELECT content_hash, previous_hash FROM audit ORDER BY timestamp"
+            "SELECT content_hash, previous_hash FROM audit ORDER BY rowid"
         ).fetchall()
         prev = None
         for r in rows:
@@ -240,6 +269,7 @@ class Storage:
             prev = r["content_hash"]
         return True
 
+    @_serialised
     def close(self):
         try:
             self.conn.close()

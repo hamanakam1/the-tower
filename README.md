@@ -35,6 +35,8 @@
 
 The Tower sits above the execution layer, monitors the physical airspace, clears compute tasks for takeoff, and ruthlessly shoots down rogue flights before they melt a motherboard.
 
+> **📋 [Long-Term Plan](docs/roadmap.md)** — where this is going, how it should be built, and what has to be true before each release. Read it before proposing a feature.
+
 ```text
 TTTTT H   H EEEEE TTTTT  OOO  W   W EEEEE RRRR
   T   H   H E       T   O   O W   W E     R   R
@@ -117,9 +119,47 @@ the-tower status           # node health
 
 Open the dashboard at `http://127.0.0.1:8765/` for the live radar, node health, flight board, and anti-air battery controls.
 
+### Screenshots
+
+| | |
+|---|---|
+| ![Tower dashboard overview](docs/screenshots/dashboard-overview.png) <br/> **Tower dashboard** — live radar, node health, flight board, event log and anti-air battery. | ![Radar sweep](docs/screenshots/radar.png) <br/> **Radar** — node blips, in-flight traffic and airspace counters. |
+| ![Flight board](docs/screenshots/flight-board.png) <br/> **Flight board** — callsign, task, assigned node, priority and status. | ![Anti-air battery](docs/screenshots/anti-air-battery.png) <br/> **Anti-air battery** — the kill console. |
+
+<details>
+<summary>More views</summary>
+
+| | |
+|---|---|
+| ![Node health](docs/screenshots/nodes.png) <br/> **Node health** — CPU, memory, temperature, power, battery and solar per node. | ![Event log](docs/screenshots/event-log.png) <br/> **Event log** — clearance, kill and redline events as they happen. |
+| ![Clearance request](docs/screenshots/clearance-request.png) <br/> **Clearance request** — ask for takeoff with a resource weight. | ![Telemetry trends](docs/screenshots/trends.png) <br/> **Trends** — thermal slope and time-to-redline per node. |
+| ![Containers](docs/screenshots/containers.png) <br/> **Containers** — registered containers and their heartbeats. | ![Responsive layout](docs/screenshots/dashboard-narrow.png) <br/> **Responsive layout** — the same console on a narrow viewport. |
+
+</details>
+
+## Architecture
+
+The Tower is an admission-control plane for physical compute: it decides
+where a task may run and what it may do to the machine, and it records every
+decision.
+
+![Proposed target architecture](docs/architecture/tower-target.png)
+
+This is the **proposed v1.0** target, not the current implementation. The
+current implementation is a single-process prototype; the honest gap analysis
+is in [the long-term plan](docs/roadmap.md#2-where-we-are-an-honest-read-of-v030),
+and the machine-readable diagram source is
+[`docs/architecture/tower-target.architecture.json`](docs/architecture/tower-target.architecture.json).
+
 ## Status
 
 Working prototype - hardware ATC with telemetry, clearance dispatch, anomaly detection, and kill-switch.
+
+**Read this before trusting it with real hardware.** Two of the three mesh
+nodes are still simulated, the kill path will `SIGKILL` any numeric container
+id, and the audit chain does not yet record admission decisions. The
+[long-term plan](docs/roadmap.md) lists every gap with the horizon that
+closes it.
 
 ## License
 
