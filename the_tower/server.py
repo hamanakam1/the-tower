@@ -287,6 +287,16 @@ class TowerServer:
             node = tower.get_node(node_id)
             return JSONResponse({"ok": True, "node": node.model_dump(mode="json")})
 
+        async def set_node_state(request):
+            node_id = request.path_params["node_id"]
+            body = await request.json()
+            state = body.get("state", "online")
+            ok = tower.set_node_state(node_id, state)
+            if not ok:
+                return JSONResponse({"error": "node not found or bad state"}, status_code=400)
+            node = tower.get_node(node_id)
+            return JSONResponse({"ok": True, "node": node.model_dump(mode="json")})
+
         async def audit_verify(request):
             return JSONResponse({"valid": await tower.verify_audit_async()})
 
@@ -294,6 +304,13 @@ class TowerServer:
             body = await request.json()
             aid = await tower.log_audit_async(body)
             return JSONResponse({"audit_id": aid})
+
+        async def rollup(request):
+            node_id = request.query_params.get("node")
+            if tower.storage is None:
+                return JSONResponse({"rollups": []})
+            rows = await tower._store(tower.storage.load_rollup, node_id, 500) or []
+            return JSONResponse({"rollups": rows})
 
         async def node_history(request):
             node_id = request.path_params["node_id"]
@@ -366,10 +383,12 @@ class TowerServer:
             Route("/flights/{flight_id}", flight_detail),
             Route("/trend/{node_id}", trend),
             Route("/history/{node_id}", node_history),
+            Route("/rollup", rollup),
             Route("/ingest/{node_id}", ingest, methods=["POST"]),
             Route("/nodes", register_node, methods=["POST"]),
             Route("/nodes/{node_id}", unregister_node, methods=["DELETE"]),
             Route("/nodes/{node_id}/enforcement", set_enforcement, methods=["POST"]),
+            Route("/nodes/{node_id}/state", set_node_state, methods=["POST"]),
             Route("/audit/verify", audit_verify),
             Route("/audit", audit_log, methods=["POST"]),
             Route("/conflicts", conflicts),
@@ -412,7 +431,13 @@ class TowerServer:
                 return await call_next(request)
 
         app.add_middleware(AuthMiddleware)
-        app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+        # CORS is an allowlist, not a wildcard. A browser on another origin
+        # has no business driving the hardware.
+        origins = [o.strip() for o in os.environ.get("TOWER_CORS_ORIGINS", "").split(",")
+                   if o.strip()]
+        app.add_middleware(CORSMiddleware, allow_origins=origins,
+                           allow_methods=["GET", "POST", "DELETE"],
+                           allow_headers=["Authorization", "Content-Type"])
         return app
 
     def run(self, host: str = "127.0.0.1", port: int = 8765):

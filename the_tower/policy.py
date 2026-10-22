@@ -70,7 +70,8 @@ class NodeView:
     def accepts(self, w: ResourceWeight) -> bool:
         """Would this node safely take this flight right now?"""
         if self.status in (NodeStatus.OFFLINE.value, NodeStatus.REDLINE.value,
-                           NodeStatus.UNKNOWN.value):
+                           NodeStatus.UNKNOWN.value, NodeStatus.DRAINING.value,
+                           NodeStatus.CORDONED.value, NodeStatus.MAINTENANCE.value):
             return False
         if self.thermal_state == ThermalState.CRITICAL.value:
             return False

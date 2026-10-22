@@ -24,6 +24,9 @@ class NodeStatus(str, Enum):
     OVERLOADED = "overloaded"
     REDLINE = "redline"
     UNKNOWN = "unknown"
+    DRAINING = "draining"
+    CORDONED = "cordoned"
+    MAINTENANCE = "maintenance"
 
 
 class ThermalState(str, Enum):
@@ -178,7 +181,9 @@ class Node(BaseModel):
         }
 
     def can_accept(self, weight: ResourceWeight) -> bool:
-        if self.status in (NodeStatus.OFFLINE, NodeStatus.REDLINE, NodeStatus.UNKNOWN):
+        if self.status in (NodeStatus.OFFLINE, NodeStatus.REDLINE, NodeStatus.UNKNOWN,
+                           NodeStatus.DRAINING, NodeStatus.CORDONED,
+                           NodeStatus.MAINTENANCE):
             return False
         if self.telemetry.thermal_state in (ThermalState.CRITICAL,):
             return False
@@ -263,6 +268,10 @@ class KillRequest(BaseModel):
     reason: str = "manual kill"
     requester: str = "operator"
     force: bool = False
+    drain_first: bool = Field(default=True,
+                              description="Stop admitting to the node before killing")
+    drain_timeout_s: float = Field(default=0.0, ge=0.0,
+                                   description="Seconds to wait for in-flight work to land")
 
 
 class KillResponse(BaseModel):

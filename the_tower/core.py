@@ -85,6 +85,8 @@ class Tower:
         self._last_decision: Optional[Decision] = None
         # node id -> latest safety-ladder assessment
         self._node_ladder: Dict[str, Any] = {}
+        # last telemetry rollup (epoch seconds)
+        self._last_rollup: float = 0.0
         # persist node specs
         if self.storage is not None:
             for spec in specs:
@@ -180,10 +182,25 @@ class Tower:
             try:
                 await self.kill(KillRequest(container_id=cid, reason="heartbeat timeout", requester="tower"))
             except Exception as e:
-                print(f"stale kill error: {e}")
+                logger.warning("stale kill error: %s", e)
+        # telemetry retention: roll old samples up so history stays small
+        await self._maybe_rollup()
         # update flight statuses: in-flight flights may land randomly-ish based on duration
         await self._progress_flights()
         await self._dispatch_queued()
+
+    async def _maybe_rollup(self):
+        """Roll up telemetry at most once every five minutes."""
+        now = time.time()
+        if now - self._last_rollup < 300:
+            return
+        self._last_rollup = now
+        if self.storage is None:
+            return
+        result = await self._store(self.storage.rollup_telemetry, now)
+        if result and result.get("rolled"):
+            logger.info("telemetry rollup: %s samples rolled, %s deleted",
+                        result["rolled"], result["deleted"])
 
     async def _auto_kill_on_redline(self, node_id: str):
         node = self.nodes.get(node_id)
@@ -521,6 +538,14 @@ class Tower:
     async def kill(self, req: KillRequest) -> KillResponse:
         response = None
         async with self._lock:
+            # A kill is destructive. It requires a reason.
+            if not req.reason or not req.reason.strip():
+                self._emit(EventKind.KILL, container_id=req.container_id,
+                           message=f"KILL refused: {req.container_id} - no reason given",
+                           severity="warn")
+                return KillResponse(success=False, container_id=req.container_id,
+                                    message="Refused: a kill requires a reason")
+
             # find flight by container
             flight_id = self._killed_containers.get(req.container_id)
             if flight_id is None:
@@ -532,6 +557,21 @@ class Tower:
             flight = self.flights.get(flight_id) if flight_id else None
             if flight:
                 node_id = flight.assigned_node
+            # Drain before kill: stop admitting to the node so the kill is
+            # the last thing that happens, not the first.
+            if req.drain_first and node_id and node_id in self.nodes:
+                node = self.nodes[node_id]
+                if node.status == NodeStatus.ONLINE and node.active_flights:
+                    node.status = NodeStatus.DRAINING
+                    self._emit(EventKind.ANOMALY, node_id=node_id,
+                               message=(f"Draining {node.spec.name} before kill "
+                                        f"({len(node.active_flights)} flight(s) in the air)"),
+                               severity="warn",
+                               data={"active_flights": list(node.active_flights)})
+                    await self.log_audit_async({"kind": "drain", "node_id": node_id,
+                                                "active_flights": list(node.active_flights),
+                                                "reason": req.reason})
+            if flight:
                 if flight.status in (FlightStatus.IN_FLIGHT, FlightStatus.CLEARED, FlightStatus.QUEUED):
                     flight.status = FlightStatus.SHOT_DOWN
                     self._queued_ids.discard(flight.id)
@@ -550,22 +590,26 @@ class Tower:
                     await self._store(self.storage.upsert_flight, flight)
             # actual process kill (best effort) for local containers
             killed_proc = False
-            try:
-                # Only kill processes the Tower actually owns. A numeric
-                # container_id is treated as a PID only when that container
-                # was explicitly registered with a matching pid.
-                info = self.containers.get(req.container_id)
-                pid = None
-                if info is not None:
-                    pid = (info.get("metadata") or {}).get("pid")
-                    if pid is None and req.container_id.isdigit():
-                        pid = int(req.container_id)
-                if pid is not None and info is not None:
+            # Only kill processes the Tower actually owns. A numeric
+            # container_id is treated as a PID only when that container
+            # was explicitly registered with a matching pid.
+            info = self.containers.get(req.container_id)
+            pid = None
+            if info is not None:
+                pid = (info.get("metadata") or {}).get("pid")
+                if pid is None and req.container_id.isdigit():
+                    pid = int(req.container_id)
+            if pid is not None:
+                try:
                     import os, signal
                     os.kill(int(pid), signal.SIGKILL)
                     killed_proc = True
-            except Exception:
-                killed_proc = False
+                except Exception:
+                    killed_proc = False
+            if info is not None:
+                info["status"] = "killed"
+                if self.storage is not None:
+                    await self._store(self.storage.upsert_container, info)
             self._killed_containers[req.container_id] = flight_id or ""
             self._emit(EventKind.KILL, node_id=node_id, flight_id=flight_id,
                        container_id=req.container_id,
@@ -616,6 +660,38 @@ class Tower:
         self._emit(EventKind.NODE_ONLINE, node_id=spec.id,
                    message=f"Node registered: {spec.name}", severity="info")
         return node
+
+    # ---------------- node lifecycle ----------------
+    def set_node_state(self, node_id: str, state: str) -> bool:
+        """Move a node through its lifecycle.
+
+        `online -> draining -> cordoned -> maintenance -> offline -> unknown`
+
+        Draining stops new flights but lets in-flight work land, so
+        "shut this node down for a firmware update" is a safe operation
+        rather than a kill-everything event.
+        """
+        node = self.nodes.get(node_id)
+        if node is None:
+            return False
+        try:
+            new_status = NodeStatus(state)
+        except ValueError:
+            return False
+        previous = node.status
+        node.status = new_status
+        if self.storage is not None:
+            try:
+                self.storage.upsert_node_spec(node_id, node.spec.model_dump_json())
+            except Exception as e:
+                logger.warning("node spec persist failed: %s", e)
+        self._emit(EventKind.ANOMALY, node_id=node_id,
+                   message=f"Node {node.spec.name}: {previous.value} -> {new_status.value}",
+                   severity="warn" if new_status != NodeStatus.ONLINE else "info",
+                   data={"previous": previous.value, "state": new_status.value})
+        self.log_audit({"kind": "node_state", "node_id": node_id,
+                        "previous": previous.value, "state": new_status.value})
+        return True
 
     def set_enforcement(self, node_id: str, mode: str) -> bool:
         """Switch a node between 'advisory' and 'enforce'.

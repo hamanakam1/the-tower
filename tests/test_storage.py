@@ -84,6 +84,30 @@ def test_containers_persist(tmp_path):
     assert loaded[0]["metadata"]["pid"] == 123
 
 
+def test_telemetry_rollup_keeps_history_small(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from the_tower.schemas import Telemetry
+
+    s = Storage(str(tmp_path / "r.sqlite"))
+    now = datetime.now(timezone.utc)
+    # two hours of 5-second samples
+    for i in range(1440):
+        ts = now - timedelta(seconds=5 * i)
+        s.append_telemetry(Telemetry(
+            node_id="n1", timestamp=ts, cpu_percent=10.0, memory_percent=20.0,
+            memory_used_gb=1.0, memory_total_gb=8.0, temperature_c=40.0,
+            power_watts=20.0, bandwidth_mbps=1.0, load_avg=0.5,
+        ))
+    result = s.rollup_telemetry()
+    assert result["rolled"] > 0
+    rollups = s.load_rollup("n1")
+    assert rollups
+    # the raw table no longer holds the old samples
+    remaining = s.conn.execute("SELECT COUNT(*) FROM telemetry").fetchone()[0]
+    assert remaining < 1440
+    s.close()
+
+
 @pytest.mark.asyncio
 async def test_tower_audit_endpoint_accepts_rapid_writes(tmp_path):
     # Regression: the storage connection was bound to the thread that built it,

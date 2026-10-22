@@ -11,6 +11,7 @@ import json
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -93,6 +94,18 @@ CREATE TABLE IF NOT EXISTS audit (
     previous_hash TEXT,
     payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS telemetry_rollup (
+    node_id TEXT,
+    bucket_start TEXT,
+    bucket_seconds INTEGER,
+    samples INTEGER,
+    cpu_percent REAL,
+    memory_percent REAL,
+    temperature_c REAL,
+    power_watts REAL,
+    load_avg REAL
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_node ON telemetry_rollup(node_id, bucket_start);
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL,
@@ -135,6 +148,21 @@ MIGRATIONS = [
     (4, "telemetry provenance", [
         "ALTER TABLE telemetry ADD COLUMN source TEXT",
         "ALTER TABLE telemetry ADD COLUMN source_note TEXT",
+    ]),
+    # v5 — rolled-up telemetry so a month of mesh history stays small.
+    (5, "telemetry rollup", [
+        """CREATE TABLE IF NOT EXISTS telemetry_rollup (
+               node_id TEXT,
+               bucket_start TEXT,
+               bucket_seconds INTEGER,
+               samples INTEGER,
+               cpu_percent REAL,
+               memory_percent REAL,
+               temperature_c REAL,
+               power_watts REAL,
+               load_avg REAL
+           )""",
+        "CREATE INDEX IF NOT EXISTS idx_rollup_node ON telemetry_rollup(node_id, bucket_start)",
     ]),
 ]
 
@@ -356,6 +384,77 @@ class Storage:
             ))
         out.reverse()
         return out
+
+    # ---- retention / rollup ----
+    @_serialised
+    def rollup_telemetry(self, now: Optional[float] = None) -> Dict[str, int]:
+        """Roll raw telemetry up into 1-minute, 1-hour and 1-day summaries.
+
+        Raw 5-second samples are only useful for the recent past. Older
+        samples are averaged into progressively coarser buckets, so a month
+        of mesh history costs kilobytes instead of gigabytes.
+        """
+        now = now if now is not None else time.time()
+        counts = {"rolled": 0, "deleted": 0}
+        boundaries = [
+            (60.0, 60.0, "1m"),        # keep 1 minute of raw samples
+            (3600.0, 300.0, "5m"),     # keep 1 hour as 5-minute averages
+            (86400.0, 3600.0, "1h"),   # keep 1 day as hourly averages
+            (2592000.0, 86400.0, "1d"), # keep 1 month as daily averages
+        ]
+        for raw_keep, bucket, label in boundaries:
+            cutoff = now - raw_keep
+            rows = self.conn.execute(
+                "SELECT node_id, timestamp, cpu_percent, memory_percent, temperature_c, "
+                "power_watts, load_avg FROM telemetry WHERE timestamp < ?",
+                (time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(cutoff)),),
+            ).fetchall()
+            if not rows:
+                continue
+            buckets: Dict[Any, List[Any]] = {}
+            for r in rows:
+                ts = r["timestamp"]
+                try:
+                    epoch = datetime.fromisoformat(ts).timestamp()
+                except ValueError:
+                    epoch = now
+                key = (r["node_id"], int(epoch // bucket) * bucket)
+                buckets.setdefault(key, []).append(r)
+            for (node_id, bucket_start), group in buckets.items():
+                n = len(group)
+                def avg(field):
+                    vals = [g[field] for g in group if g[field] is not None]
+                    return sum(vals) / len(vals) if vals else None
+                stamp = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(bucket_start))
+                self.conn.execute(
+                    """INSERT INTO telemetry_rollup
+                       (node_id, bucket_start, bucket_seconds, samples, cpu_percent,
+                        memory_percent, temperature_c, power_watts, load_avg)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (node_id, stamp, int(bucket), n, avg("cpu_percent"),
+                     avg("memory_percent"), avg("temperature_c"), avg("power_watts"),
+                     avg("load_avg")),
+                )
+                counts["rolled"] += n
+            self.conn.execute(
+                "DELETE FROM telemetry WHERE timestamp < ?",
+                (time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(cutoff)),),
+            )
+            counts["deleted"] += len(rows)
+        self.conn.commit()
+        return counts
+
+    @_serialised
+    def load_rollup(self, node_id: Optional[str] = None, limit: int = 500) -> List[Dict[str, Any]]:
+        if node_id:
+            rows = self.conn.execute(
+                "SELECT * FROM telemetry_rollup WHERE node_id=? ORDER BY bucket_start DESC LIMIT ?",
+                (node_id, limit)).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM telemetry_rollup ORDER BY bucket_start DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [dict(r) for r in rows]
 
     # ---- containers ----
     @_serialised
