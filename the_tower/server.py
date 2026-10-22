@@ -10,6 +10,8 @@ from starlette.responses import JSONResponse, HTMLResponse, FileResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+import os
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .core import Tower
@@ -171,12 +173,28 @@ class TowerServer:
 
         async def conflicts(request):
             scope = [s for s in request.query_params.get("scope", "").split(",") if s]
-            # build a temp flight-like check using scope_conflict requires Flight; do manual
             conflicting = []
+            from the_tower.schemas import FlightStatus
             for fid, f in tower.flights.items():
-                if f.status == __import__("the_tower.schemas", fromlist=["FlightStatus"]).FlightStatus.IN_FLIGHT and set(f.scope) & set(scope):
+                if f.status == FlightStatus.IN_FLIGHT and set(f.scope) & set(scope):
                     conflicting.append(fid)
             return JSONResponse({"conflicting_flights": conflicting})
+
+        async def register_container(request):
+            body = await request.json()
+            cid = body.get("container_id") or body.get("id")
+            if not cid:
+                return JSONResponse({"error": "container_id required"}, status_code=400)
+            info = tower.register_container(cid, body.get("flight_id"), body.get("node_id"), body.get("metadata"))
+            return JSONResponse({"ok": True, "container": info})
+
+        async def heartbeat(request):
+            cid = request.path_params["container_id"]
+            tower.heartbeat(cid)
+            return JSONResponse({"ok": True})
+
+        async def list_containers(request):
+            return JSONResponse({"containers": list(tower.containers.values())})
 
         routes = [
             Route("/", root),
@@ -195,10 +213,25 @@ class TowerServer:
             Route("/audit/verify", audit_verify),
             Route("/audit", audit_log, methods=["POST"]),
             Route("/conflicts", conflicts),
+            Route("/containers", register_container, methods=["POST"]),
+            Route("/containers", list_containers, methods=["GET"]),
+            Route("/containers/{container_id}/heartbeat", heartbeat, methods=["POST"]),
             WebSocketRoute("/ws", ws_handler),
         ]
 
         app = Starlette(routes=routes)
+
+        token = os.environ.get("TOWER_TOKEN")
+
+        class AuthMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):
+                if token and request.method in ("POST", "DELETE", "PUT", "PATCH"):
+                    auth = request.headers.get("authorization", "")
+                    if auth != f"Bearer {token}":
+                        return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return await call_next(request)
+
+        app.add_middleware(AuthMiddleware)
         app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
         return app
 

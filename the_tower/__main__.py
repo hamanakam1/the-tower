@@ -27,8 +27,9 @@ def build_parser():
     status = sub.add_parser("status", help="Print node status")
     status.add_argument("node", nargs="?")
 
-    demo = sub.add_parser("demo", help="Run a demo: submit sample flights")
+    demo = sub.add_parser("demo", help="Seed demo flights against a running Tower")
     demo.add_argument("--port", type=int, default=8765)
+    demo.add_argument("--count", type=int, default=5)
 
     return p
 
@@ -87,6 +88,26 @@ async def cmd_status(args):
     await tower.stop()
 
 
+async def cmd_demo(args):
+    import httpx
+    base = f"http://127.0.0.1:{args.port}"
+    samples = [
+        ("train model", 4, 16, 30, ["model-x"], False),
+        ("ingest batch", 2, 4, 10, ["ingest"], False),
+        ("rogue miner", 8, 32, 120, ["miner"], True),
+        ("cleanup job", 1, 2, 5, [], False),
+        ("eval suite", 2, 8, 20, ["eval"], False),
+    ]
+    async with httpx.AsyncClient() as c:
+        for i in range(args.count):
+            task, cpu, mem, dur, scope, rogue = samples[i % len(samples)]
+            body = {"task": f"{task} #{i+1}", "priority": (i % 3),
+                    "weight": {"cpu_cores": cpu, "memory_gb": mem, "duration_est_s": dur},
+                    "scope": scope, "rogue": rogue}
+            r = await c.post(f"{base}/clearance", json=body)
+            print(r.status_code, r.json().get("decision"), body["task"])
+    print("demo seeded")
+
 def main():
     args = build_parser().parse_args()
     if args.command == "serve":
@@ -95,6 +116,8 @@ def main():
         asyncio.run(cmd_radar(args))
     elif args.command == "status":
         asyncio.run(cmd_status(args))
+    elif args.command == "demo":
+        asyncio.run(cmd_demo(args))
     else:
         print(f"Unknown command: {args.command}", file=sys.stderr)
         sys.exit(1)

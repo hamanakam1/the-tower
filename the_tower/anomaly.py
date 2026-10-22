@@ -36,8 +36,10 @@ class AnomalyRadar:
         xs = [i * 5.0 for i in range(len(hist))]
         temps = [h.temperature_c for h in hist]
         mems = [h.memory_percent for h in hist]
+        powers = [h.power_watts for h in hist]
         slope_t, _ = _linreg(xs, temps)
         slope_m, _ = _linreg(xs, mems)
+        slope_p, _ = _linreg(xs, powers)
         redline = node.spec.redline_temp_c
         current_temp = hist[-1].temperature_c
         # predict seconds to redline
@@ -70,6 +72,37 @@ class AnomalyRadar:
                 severity="warn",
                 data={"slope_mem": slope_m},
             ))
+        if slope_p > 2.0 and hist[-1].power_watts > node.spec.max_power_watts * 0.8:
+            events.append(TowerEvent(
+                kind=EventKind.ANOMALY,
+                node_id=node.spec.id,
+                message=f"Power draw rising: +{slope_p:.2f}W/sample, now {hist[-1].power_watts:.1f}W",
+                severity="warn",
+                data={"slope_power": slope_p},
+            ))
+        # z-score spike detection on temperature
+        if len(temps) >= 8:
+            recent = temps[-3:]
+            baseline = temps[:-3]
+            if baseline:
+                import statistics
+                mean = statistics.fmean(baseline)
+                try:
+                    sd = statistics.pstdev(baseline)
+                except Exception:
+                    sd = 0.0
+                if sd > 0:
+                    for v in recent:
+                        z = (v - mean) / sd
+                        if z > 2.5:
+                            events.append(TowerEvent(
+                                kind=EventKind.ANOMALY,
+                                node_id=node.spec.id,
+                                message=f"Thermal spike: {v:.1f}C (z={z:.2f})",
+                                severity="warn",
+                                data={"z": z, "value": v},
+                            ))
+                            break
         # redline breach
         if current_temp >= redline:
             events.append(TowerEvent(

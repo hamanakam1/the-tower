@@ -68,6 +68,7 @@ class Tower:
         self._killed_containers: Dict[str, str] = {}  # container_id -> flight_id
         self._subscribers: List[Callable] = []
         self._async_subscribers: List[Callable] = []
+        self.containers: Dict[str, Dict[str, Any]] = {}  # container_id -> info
         # persist node specs
         if self.storage is not None:
             for spec in specs:
@@ -133,6 +134,12 @@ class Tower:
                 # auto-kill check: if redline breach, shoot down active flights on that node
                 if ev.kind == EventKind.REDLINE:
                     await self._auto_kill_on_redline(nid)
+        # stale container kill-switch
+        for cid in self.stale_containers():
+            try:
+                await self.kill(KillRequest(container_id=cid, reason="heartbeat timeout", requester="tower"))
+            except Exception as e:
+                print(f"stale kill error: {e}")
         # update flight statuses: in-flight flights may land randomly-ish based on duration
         await self._progress_flights()
         await self._dispatch_queued()
@@ -478,6 +485,36 @@ class Tower:
 
     def recent_events(self, limit: int = 50) -> List[TowerEvent]:
         return list(self.events)[-limit:]
+
+    # ---------------- containers ----------------
+    def register_container(self, container_id: str, flight_id: Optional[str] = None,
+                           node_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None):
+        self.containers[container_id] = {
+            "container_id": container_id,
+            "flight_id": flight_id,
+            "node_id": node_id,
+            "metadata": metadata or {},
+            "last_heartbeat": datetime.now(timezone.utc),
+            "status": "running",
+        }
+        return self.containers[container_id]
+
+    def heartbeat(self, container_id: str) -> bool:
+        if container_id not in self.containers:
+            self.register_container(container_id)
+        self.containers[container_id]["last_heartbeat"] = datetime.now(timezone.utc)
+        self.containers[container_id]["status"] = "running"
+        return True
+
+    def stale_containers(self, timeout_s: float = 30.0) -> List[str]:
+        now = datetime.now(timezone.utc)
+        out = []
+        for cid, info in self.containers.items():
+            if info["status"] != "running":
+                continue
+            if (now - info["last_heartbeat"]).total_seconds() > timeout_s:
+                out.append(cid)
+        return out
 
     def trend(self, node_id: str) -> dict:
         node = self.nodes.get(node_id)
