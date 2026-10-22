@@ -215,6 +215,8 @@ class Flight(BaseModel):
     assigned_node: Optional[str] = None
     reason: str = ""
     rogue: bool = False
+    retries: int = 0
+    max_retries: int = 2
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     def model_post_init(self, __context):

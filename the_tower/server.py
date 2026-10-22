@@ -230,9 +230,23 @@ class TowerServer:
         app = Starlette(routes=routes)
 
         token = os.environ.get("TOWER_TOKEN")
+        rate_limit = int(os.environ.get("TOWER_RATE_LIMIT", "0"))  # requests per minute per IP, 0=off
+
+        _buckets = {}
 
         class AuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):
+                if rate_limit > 0:
+                    import time
+                    ip = request.client.host if request.client else "unknown"
+                    now = time.time()
+                    b = _buckets.get(ip)
+                    if b is None or now - b[0] > 60:
+                        _buckets[ip] = [now, 1]
+                    else:
+                        b[1] += 1
+                        if b[1] > rate_limit:
+                            return JSONResponse({"error": "rate limited"}, status_code=429)
                 if token and request.method in ("POST", "DELETE", "PUT", "PATCH"):
                     auth = request.headers.get("authorization", "")
                     if auth != f"Bearer {token}":

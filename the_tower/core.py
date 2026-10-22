@@ -151,11 +151,19 @@ class Tower:
         for fid in list(node.active_flights):
             flight = self.flights.get(fid)
             if flight and flight.status == FlightStatus.IN_FLIGHT:
-                flight.status = FlightStatus.SHOT_DOWN
-                flight.shot_down_at = datetime.now(timezone.utc)
-                flight.reason = "auto-kill: node redline breach"
                 node.active_flights = [f for f in node.active_flights if f != fid]
                 node.active_weights.pop(fid, None)
+                if flight.retries < flight.max_retries:
+                    flight.retries += 1
+                    flight.status = FlightStatus.QUEUED
+                    flight.assigned_node = None
+                    flight.takeoff_at = None
+                    flight.cleared_at = None
+                    flight.reason = f"retry {flight.retries}/{flight.max_retries}: node redline breach"
+                else:
+                    flight.status = FlightStatus.SHOT_DOWN
+                    flight.shot_down_at = datetime.now(timezone.utc)
+                    flight.reason = "auto-kill: node redline breach (max retries)"
                 if self.storage is not None:
                     self.storage.upsert_flight(flight)
                 self._emit(EventKind.SHOT_DOWN, node_id=node_id, flight_id=fid,
