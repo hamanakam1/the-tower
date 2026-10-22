@@ -601,18 +601,6 @@ class Tower:
         if self.storage is not None:
             await self._store(self.storage.upsert_flight, flight)
 
-    def _score_node(self, node: Node, flight: Flight) -> float:
-        t = node.telemetry
-        free = node.capacity_free()
-        # higher is better
-        temp_headroom = (node.spec.redline_temp_c - t.temperature_c) / node.spec.redline_temp_c
-        load_factor = 1.0 - (t.cpu_percent / 100.0)
-        mem_factor = free["memory_gb"] / node.spec.memory_gb
-        power_headroom = 1.0 - (t.power_watts / node.spec.max_power_watts)
-        priority_boost = (4 - int(flight.priority)) * 0.05
-        return (temp_headroom * 0.35 + load_factor * 0.25 + mem_factor * 0.25 +
-                power_headroom * 0.15 + priority_boost)
-
     def _best_eventual_node(self, flight: Flight) -> Optional[str]:
         # node with most free memory among online
         best = None

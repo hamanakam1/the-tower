@@ -5,9 +5,13 @@ telemetry samples to predict time-to-redline and flag rogue flights.
 """
 from __future__ import annotations
 
+from datetime import timezone
 from typing import Dict, List, Optional, Tuple
 
 from .schemas import Node, Telemetry, TowerEvent, EventKind
+
+# Fallback spacing when the samples carry no usable timestamps.
+FALLBACK_INTERVAL_S = 5.0
 
 
 def _linreg(xs: List[float], ys: List[float]) -> Tuple[float, float]:
@@ -23,6 +27,42 @@ def _linreg(xs: List[float], ys: List[float]) -> Tuple[float, float]:
     return slope, intercept
 
 
+def time_axis(hist: List[Telemetry]) -> List[float]:
+    """Seconds since the first sample, taken from the real timestamps.
+
+    The sweep interval is configurable, so assuming five seconds between
+    samples makes every time-to-redline prediction wrong by the ratio of
+    the real interval to five - and that prediction is what drives the
+    safety ladder.
+    """
+    n = len(hist)
+    if n == 0:
+        return []
+    stamps = []
+    for h in hist:
+        ts = h.timestamp
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        stamps.append(ts)
+    base = min(stamps)
+    xs = [(ts - base).total_seconds() for ts in stamps]
+    if xs[-1] - xs[0] <= 0 and n > 1:
+        # every sample claims the same instant: there is no time axis to
+        # regress against, so fall back to even spacing.
+        return [i * FALLBACK_INTERVAL_S for i in range(n)]
+    return xs
+
+
+def sample_interval(xs: List[float]) -> float:
+    """The mean seconds between samples, from the real time axis."""
+    if len(xs) < 2:
+        return FALLBACK_INTERVAL_S
+    span = max(xs) - min(xs)
+    if span <= 0:
+        return FALLBACK_INTERVAL_S
+    return span / (len(xs) - 1)
+
+
 class AnomalyRadar:
     def __init__(self, redline_margin_s: float = 120.0):
         self.redline_margin_s = redline_margin_s
@@ -32,25 +72,25 @@ class AnomalyRadar:
         hist = node.history
         if len(hist) < 5:
             return events
-        # time axis in seconds (sample index * interval approx 5s)
-        xs = [i * 5.0 for i in range(len(hist))]
+        # Time axis in seconds, taken from the real sample timestamps.
+        xs = time_axis(hist)
+        dt = sample_interval(xs)
         temps = [h.temperature_c for h in hist]
         mems = [h.memory_percent for h in hist]
         powers = [h.power_watts for h in hist]
+        # slopes are per second; the per-sample figures are what the
+        # thresholds and the dashboard are expressed in.
         slope_t, _ = _linreg(xs, temps)
         slope_m, _ = _linreg(xs, mems)
         slope_p, _ = _linreg(xs, powers)
+        slope_t_sample = slope_t * dt
+        slope_m_sample = slope_m * dt
+        slope_p_sample = slope_p * dt
         redline = node.spec.redline_temp_c
         current_temp = hist[-1].temperature_c
         # predict seconds to redline
         if slope_t > 0:
-            secs_to_redline = (redline - current_temp) / (slope_t / 5.0) * 5.0 if slope_t != 0 else float("inf")
-            # slope per second
-            slope_per_s = slope_t / 5.0
-            if slope_per_s > 0:
-                secs_to_redline = (redline - current_temp) / slope_per_s
-            else:
-                secs_to_redline = float("inf")
+            secs_to_redline = (redline - current_temp) / slope_t
         else:
             secs_to_redline = float("inf")
 
@@ -59,26 +99,28 @@ class AnomalyRadar:
                 kind=EventKind.ANOMALY,
                 node_id=node.spec.id,
                 message=f"Thermal trend rising: predicted redline in {int(secs_to_redline)}s "
-                        f"(slope {slope_t:+.2f}C/sample)",
+                        f"(slope {slope_t_sample:+.2f}C/sample, {slope_t * 60:+.2f}C/min)",
                 severity="warn",
-                data={"slope_temp": slope_t, "secs_to_redline": secs_to_redline,
+                data={"slope_temp": slope_t_sample, "slope_temp_per_s": slope_t,
+                      "secs_to_redline": secs_to_redline,
+                      "sample_interval_s": round(dt, 3),
                       "current_temp": current_temp, "redline": redline},
             ))
-        if slope_m > 0.5 and hist[-1].memory_percent > 80:
+        if slope_m_sample > 0.5 and hist[-1].memory_percent > 80:
             events.append(TowerEvent(
                 kind=EventKind.ANOMALY,
                 node_id=node.spec.id,
-                message=f"Memory trend rising: +{slope_m:.2f}%/sample, now {hist[-1].memory_percent:.1f}%",
+                message=f"Memory trend rising: +{slope_m_sample:.2f}%/sample, now {hist[-1].memory_percent:.1f}%",
                 severity="warn",
-                data={"slope_mem": slope_m},
+                data={"slope_mem": slope_m_sample},
             ))
-        if slope_p > 2.0 and hist[-1].power_watts > node.spec.max_power_watts * 0.8:
+        if slope_p_sample > 2.0 and hist[-1].power_watts > node.spec.max_power_watts * 0.8:
             events.append(TowerEvent(
                 kind=EventKind.ANOMALY,
                 node_id=node.spec.id,
-                message=f"Power draw rising: +{slope_p:.2f}W/sample, now {hist[-1].power_watts:.1f}W",
+                message=f"Power draw rising: +{slope_p_sample:.2f}W/sample, now {hist[-1].power_watts:.1f}W",
                 severity="warn",
-                data={"slope_power": slope_p},
+                data={"slope_power": slope_p_sample},
             ))
         # z-score spike detection on temperature
         if len(temps) >= 8:
@@ -130,18 +172,22 @@ class AnomalyRadar:
     def trend_summary(self, node: Node) -> Dict:
         hist = node.history
         if len(hist) < 3:
-            return {"samples": len(hist), "temp_slope": 0.0, "mem_slope": 0.0, "secs_to_redline": None}
-        xs = [i * 5.0 for i in range(len(hist))]
+            return {"samples": len(hist), "temp_slope": 0.0, "mem_slope": 0.0,
+                    "secs_to_redline": None, "sample_interval_s": None}
+        xs = time_axis(hist)
+        dt = sample_interval(xs)
         slope_t, _ = _linreg(xs, [h.temperature_c for h in hist])
         slope_m, _ = _linreg(xs, [h.memory_percent for h in hist])
         current = hist[-1].temperature_c
         redline = node.spec.redline_temp_c
-        slope_per_s = slope_t / 5.0
-        secs = (redline - current) / slope_per_s if slope_per_s > 0 else None
+        # slope_t is per second; secs to redline follows from it directly.
+        secs = (redline - current) / slope_t if slope_t > 0 else None
         return {
             "samples": len(hist),
-            "temp_slope": round(slope_t, 3),
-            "mem_slope": round(slope_m, 3),
+            "temp_slope": round(slope_t * dt, 3),
+            "mem_slope": round(slope_m * dt, 3),
+            "temp_slope_per_s": round(slope_t, 6),
+            "sample_interval_s": round(dt, 3),
             "secs_to_redline": (round(secs, 1) if secs is not None and secs != float("inf") else None),
             "current_temp": round(current, 1),
             "redline": redline,
