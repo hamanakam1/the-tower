@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional
 
 from .schemas import (
@@ -89,6 +89,10 @@ class Tower:
         self._last_rollup: float = 0.0
         # lease id -> Lease (the Tower's claims on node resources)
         self.leases: Dict[str, Lease] = {}
+        # Processes the Tower is allowed to stop. Only a PID that was
+        # explicitly registered with the Tower ends up here, and nothing
+        # else on the host is ever signalled.
+        self._owned_pids: Dict[int, str] = {}  # pid -> container_id
         # persist node specs
         if self.storage is not None:
             for spec in specs:
@@ -120,6 +124,9 @@ class Tower:
                     except ValueError:
                         pass
                 self.containers[c["container_id"]] = c
+                # Ownership of a process survives a restart: a container that
+                # was registered with a pid is a process the Tower may stop.
+                self._claim_pid(c.get("metadata", {}).get("pid"), c["container_id"])
         # initial sweep to populate real telemetry
         await self.radar.sweep_once()
         await self.radar.start()
@@ -267,6 +274,43 @@ class Tower:
                     self._emit(EventKind.LANDING, node_id=flight.assigned_node, flight_id=fid,
                                message=f"{flight.callsign} landed on {flight.assigned_node}",
                                severity="info")
+            elif flight.status == FlightStatus.DRAINING:
+                # A draining flight is still allowed to finish. It either
+                # lands on its own, or it is terminated when the grace period
+                # the operator asked for runs out.
+                elapsed = (now - flight.takeoff_at).total_seconds() if flight.takeoff_at else 0.0
+                if elapsed >= flight.weight.duration_est_s:
+                    flight.status = FlightStatus.LANDED
+                    flight.landed_at = now
+                    node = self.nodes.get(flight.assigned_node) if flight.assigned_node else None
+                    if node and fid in node.active_flights:
+                        node.active_flights = [f for f in node.active_flights if f != fid]
+                    if node:
+                        node.active_weights.pop(fid, None)
+                    self._deindex_scope(flight)
+                    self._release_lease_for(fid)
+                    if self.storage is not None:
+                        await self._store(self.storage.upsert_flight, flight)
+                    self._emit(EventKind.LANDING, node_id=flight.assigned_node, flight_id=fid,
+                               message=f"{flight.callsign} drained and landed on {flight.assigned_node}",
+                               severity="info")
+                elif flight.drain_until and now >= flight.drain_until:
+                    flight.status = FlightStatus.SHOT_DOWN
+                    flight.shot_down_at = now
+                    flight.reason = "drain deadline expired - terminated"
+                    node = self.nodes.get(flight.assigned_node) if flight.assigned_node else None
+                    if node and fid in node.active_flights:
+                        node.active_flights = [f for f in node.active_flights if f != fid]
+                    if node:
+                        node.active_weights.pop(fid, None)
+                    self._deindex_scope(flight)
+                    self._release_lease_for(fid)
+                    if self.storage is not None:
+                        await self._store(self.storage.upsert_flight, flight)
+                    self._emit(EventKind.SHOT_DOWN, node_id=flight.assigned_node, flight_id=fid,
+                               message=f"SHOT DOWN {flight.callsign}: drain deadline expired",
+                               severity="critical",
+                               data={"drain": True})
 
     async def _dispatch_queued(self):
         # The queued index keeps this proportional to the number of *waiting*
@@ -621,7 +665,28 @@ class Tower:
                     await self.log_audit_async({"kind": "drain", "node_id": node_id,
                                                 "active_flights": list(node.active_flights),
                                                 "reason": req.reason})
-            if flight:
+
+            # A drain timeout gives the flight itself a chance to land before
+            # it is terminated. Without one, the kill is immediate.
+            draining = False
+            if (flight and req.drain_timeout_s > 0
+                    and flight.status in (FlightStatus.IN_FLIGHT, FlightStatus.CLEARED)):
+                flight.status = FlightStatus.DRAINING
+                flight.drain_until = datetime.now(timezone.utc) + timedelta(seconds=req.drain_timeout_s)
+                flight.reason = f"draining for {req.drain_timeout_s:.0f}s: {req.reason}"
+                draining = True
+                if self.storage is not None:
+                    await self._store(self.storage.upsert_flight, flight)
+                self._emit(EventKind.ANOMALY, node_id=node_id, flight_id=flight.id,
+                           message=(f"Draining {flight.callsign} for {req.drain_timeout_s:.0f}s "
+                                    f"before it is terminated"),
+                           severity="warn",
+                           data={"drain_until": flight.drain_until.isoformat(),
+                                 "reason": req.reason})
+                await self.log_audit_async({"kind": "drain_flight", "flight_id": flight.id,
+                                            "node_id": node_id, "timeout_s": req.drain_timeout_s,
+                                            "reason": req.reason})
+            elif flight:
                 if flight.status in (FlightStatus.IN_FLIGHT, FlightStatus.CLEARED, FlightStatus.QUEUED):
                     flight.status = FlightStatus.SHOT_DOWN
                     self._queued_ids.discard(flight.id)
@@ -639,42 +704,51 @@ class Tower:
                     self._release_lease_for(flight.id)
                 if flight and self.storage is not None:
                     await self._store(self.storage.upsert_flight, flight)
-            # actual process kill (best effort) for local containers
+            # Actual process termination. Only a PID the Tower was explicitly
+            # given ownership of is ever signalled: a container id that merely
+            # looks like a PID is not a licence to kill that process.
             killed_proc = False
-            # Only kill processes the Tower actually owns. A numeric
-            # container_id is treated as a PID only when that container
-            # was explicitly registered with a matching pid.
-            info = self.containers.get(req.container_id)
-            pid = None
-            if info is not None:
-                pid = (info.get("metadata") or {}).get("pid")
-                if pid is None and req.container_id.isdigit():
-                    pid = int(req.container_id)
+            pid = self._owned_pid_for(req.container_id)
             if pid is not None:
                 try:
                     import os, signal
-                    os.kill(int(pid), signal.SIGKILL)
+                    os.kill(pid, signal.SIGKILL)
                     killed_proc = True
                 except Exception:
                     killed_proc = False
+            info = self.containers.get(req.container_id)
             if info is not None:
-                info["status"] = "killed"
+                info["status"] = "draining" if draining else "killed"
                 if self.storage is not None:
                     await self._store(self.storage.upsert_container, info)
             self._killed_containers[req.container_id] = flight_id or ""
+            if draining:
+                message = (f"Draining {req.container_id} for {req.drain_timeout_s:.0f}s "
+                           f"({req.reason})")
+            elif killed_proc:
+                message = f"KILL executed: {req.container_id} ({req.reason}) - process terminated"
+            else:
+                message = (f"KILL executed: {req.container_id} ({req.reason}) - "
+                           f"no owned process to terminate")
             self._emit(EventKind.KILL, node_id=node_id, flight_id=flight_id,
                        container_id=req.container_id,
-                       message=f"KILL executed: {req.container_id} ({req.reason})",
-                       severity="critical")
+                       message=message,
+                       severity="warn" if draining else "critical",
+                       data={"draining": draining, "process_terminated": killed_proc,
+                             "pid": pid, "pid_owned": pid is not None})
             await self.log_audit_async({"kind": "kill", "container_id": req.container_id,
                                         "flight_id": flight_id, "node_id": node_id,
-                                        "reason": req.reason, "requester": req.requester})
+                                        "reason": req.reason, "requester": req.requester,
+                                        "draining": draining,
+                                        "process_terminated": killed_proc})
             response = KillResponse(
                 success=True,
                 container_id=req.container_id,
                 flight_id=flight_id,
                 node_id=node_id,
-                message=f"Killed {req.container_id}" + (" (proc terminated)" if killed_proc else ""),
+                message=message,
+                process_terminated=killed_proc,
+                draining=draining,
             )
         await self._dispatch_queued()
         return response
@@ -947,21 +1021,59 @@ class Tower:
 
     # ---------------- containers ----------------
     def register_container(self, container_id: str, flight_id: Optional[str] = None,
-                           node_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None):
+                           node_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
+                           pid: Optional[int] = None):
+        meta = dict(metadata or {})
+        if pid is not None:
+            meta["pid"] = int(pid)
         self.containers[container_id] = {
             "container_id": container_id,
             "flight_id": flight_id,
             "node_id": node_id,
-            "metadata": metadata or {},
+            "metadata": meta,
             "last_heartbeat": datetime.now(timezone.utc),
             "status": "running",
         }
+        # Registering a pid is the Tower taking ownership of that process.
+        # Nothing else on the host is ever signalled.
+        self._claim_pid(meta.get("pid"), container_id)
         if self.storage is not None:
             try:
                 self.storage.upsert_container(self.containers[container_id])
             except Exception as e:
                 logger.warning("container persist failed: %s", e)
         return self.containers[container_id]
+
+    # ---------------- process ownership ----------------
+    def _claim_pid(self, pid: Any, container_id: str) -> Optional[int]:
+        """Record that the Tower owns a process and may stop it."""
+        if pid is None:
+            return None
+        try:
+            value = int(pid)
+        except (TypeError, ValueError):
+            return None
+        if value <= 1:
+            # PID 0 and 1 are never a flight. Refuse to claim them.
+            logger.warning("refusing to claim pid %s for %s", value, container_id)
+            return None
+        self._owned_pids[value] = container_id
+        return value
+
+    def _owned_pid_for(self, container_id: str) -> Optional[int]:
+        """The PID of a process the Tower owns, or None.
+
+        A container id that merely looks like a PID is never a licence to
+        signal that process: only an explicitly registered pid is.
+        """
+        for pid, owner in self._owned_pids.items():
+            if owner == container_id:
+                return pid
+        return None
+
+    def owned_pids(self) -> Dict[str, int]:
+        """Which container owns which process. Exposed for the operator."""
+        return {owner: pid for pid, owner in self._owned_pids.items()}
 
     def heartbeat(self, container_id: str) -> bool:
         if container_id not in self.containers:

@@ -40,6 +40,7 @@ class FlightStatus(str, Enum):
     QUEUED = "queued"
     CLEARED = "cleared"
     IN_FLIGHT = "in_flight"
+    DRAINING = "draining"
     LANDED = "landed"
     SHOT_DOWN = "shot_down"
     CRASHED = "crashed"
@@ -231,6 +232,10 @@ class Flight(BaseModel):
     takeoff_at: Optional[datetime] = None
     landed_at: Optional[datetime] = None
     shot_down_at: Optional[datetime] = None
+    drain_until: Optional[datetime] = Field(
+        default=None,
+        description="When a draining flight stops being allowed to finish. "
+                    "Set when a kill is asked to drain before it kills.")
     assigned_node: Optional[str] = None
     reason: str = ""
     rogue: bool = False
@@ -350,6 +355,14 @@ class KillResponse(BaseModel):
     flight_id: Optional[str] = None
     node_id: Optional[str] = None
     message: str
+    process_terminated: bool = Field(
+        default=False,
+        description="True only when the Tower actually signalled a process it "
+                    "owns. A refused or unknown target is False.")
+    draining: bool = Field(
+        default=False,
+        description="True when the flight was given a grace period instead of "
+                    "being terminated on the spot.")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

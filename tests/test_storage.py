@@ -63,9 +63,46 @@ def test_migration_rollback(tmp_path):
     rolled = s.rollback_migration(top - 1)
     assert rolled == 1
     assert s.schema_version() == top - 1
-    # the rolled-back table is gone
+    s.close()
+
+
+def test_rollback_removes_the_rollup_table(tmp_path):
+    s = Storage(str(tmp_path / "rb-rollup.sqlite"))
+    assert s.schema_version() >= 5
+    s.rollback_migration(4)
     with pytest.raises(Exception):
         s.conn.execute("SELECT * FROM telemetry_rollup LIMIT 1").fetchall()
+    s.close()
+
+
+def test_drain_deadline_column_is_added_and_rolled_back(tmp_path):
+    s = Storage(str(tmp_path / "drain.sqlite"))
+    assert s.schema_version() >= 6
+    cols = {r[1] for r in s.conn.execute("PRAGMA table_info(flights)").fetchall()}
+    assert "drain_until" in cols
+    s.rollback_migration(5)
+    cols = {r[1] for r in s.conn.execute("PRAGMA table_info(flights)").fetchall()}
+    assert "drain_until" not in cols
+    # and forward again
+    s.apply_migrations()
+    cols = {r[1] for r in s.conn.execute("PRAGMA table_info(flights)").fetchall()}
+    assert "drain_until" in cols
+    s.close()
+
+
+def test_drain_deadline_round_trips(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from the_tower.schemas import Flight, ResourceWeight
+
+    s = Storage(str(tmp_path / "drain-rt.sqlite"))
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=30)
+    f = Flight(task="draining", weight=ResourceWeight(cpu_cores=1, memory_gb=1))
+    f.drain_until = deadline
+    s.upsert_flight(f)
+    loaded = [x for x in s.load_flights() if x.task == "draining"]
+    assert loaded
+    assert loaded[0].drain_until is not None
     s.close()
 
 

@@ -259,6 +259,8 @@ class TowerServer:
                 reason=body.get("reason", "manual kill"),
                 requester=body.get("requester", "operator"),
                 force=bool(body.get("force", False)),
+                drain_first=bool(body.get("drain_first", True)),
+                drain_timeout_s=float(body.get("drain_timeout_s", 0) or 0),
             )
             resp = await tower.kill(req)
             return JSONResponse(resp.model_dump(mode="json"))
@@ -374,7 +376,13 @@ class TowerServer:
             cid = body.get("container_id") or body.get("id")
             if not cid:
                 return JSONResponse({"error": "container_id required"}, status_code=400)
-            info = tower.register_container(cid, body.get("flight_id"), body.get("node_id"), body.get("metadata"))
+            # A pid handed over here is a process the Tower takes ownership of
+            # and is therefore allowed to stop later.
+            pid = body.get("pid")
+            if pid is None:
+                pid = (body.get("metadata") or {}).get("pid")
+            info = tower.register_container(cid, body.get("flight_id"), body.get("node_id"),
+                                            body.get("metadata"), pid=pid)
             return JSONResponse({"ok": True, "container": _container_json(info)})
 
         async def heartbeat(request):

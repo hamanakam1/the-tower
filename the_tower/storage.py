@@ -164,6 +164,10 @@ MIGRATIONS = [
            )""",
         "CREATE INDEX IF NOT EXISTS idx_rollup_node ON telemetry_rollup(node_id, bucket_start)",
     ]),
+    # v6 — a draining flight records the deadline it has to land by.
+    (6, "flight drain deadline", [
+        "ALTER TABLE flights ADD COLUMN drain_until TEXT",
+    ]),
 ]
 
 # The reverse of each migration, applied newest-first when rolling back.
@@ -182,6 +186,9 @@ ROLLBACKS = {
     5: [
         "DROP INDEX IF EXISTS idx_rollup_node",
         "DROP TABLE IF EXISTS telemetry_rollup",
+    ],
+    6: [
+        "ALTER TABLE flights DROP COLUMN drain_until",
     ],
 }
 
@@ -293,8 +300,8 @@ class Storage:
                (id, callsign, task, requester, priority, weight_json, container_id,
                 preferred_node, status, submitted_at, cleared_at, takeoff_at, landed_at,
                 shot_down_at, assigned_node, reason, rogue, metadata_json, scope_json,
-                retries, max_retries)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                retries, max_retries, drain_until)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                callsign=excluded.callsign, task=excluded.task, requester=excluded.requester,
                priority=excluded.priority, weight_json=excluded.weight_json,
@@ -305,7 +312,7 @@ class Storage:
                assigned_node=excluded.assigned_node, reason=excluded.reason,
                rogue=excluded.rogue, metadata_json=excluded.metadata_json,
                scope_json=excluded.scope_json, retries=excluded.retries,
-               max_retries=excluded.max_retries""",
+               max_retries=excluded.max_retries, drain_until=excluded.drain_until""",
             (
                 f.id, f.callsign, f.task, f.requester, int(f.priority), f.weight.model_dump_json(),
                 f.container_id, f.preferred_node, f.status.value,
@@ -315,6 +322,7 @@ class Storage:
                 f.shot_down_at.isoformat() if f.shot_down_at else None,
                 f.assigned_node, f.reason, 1 if f.rogue else 0, json.dumps(f.metadata),
                 json.dumps(f.scope), f.retries, f.max_retries,
+                f.drain_until.isoformat() if f.drain_until else None,
             ),
         )
         self.conn.commit()
@@ -360,6 +368,7 @@ class Storage:
                 scope=json.loads(r["scope_json"]) if r["scope_json"] else [],
                 retries=r["retries"] or 0,
                 max_retries=r["max_retries"] if r["max_retries"] is not None else 2,
+                drain_until=r["drain_until"] if "drain_until" in r.keys() else None,
             )
             out.append(f)
         return out
