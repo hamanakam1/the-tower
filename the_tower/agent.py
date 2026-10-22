@@ -10,26 +10,14 @@ import httpx
 import psutil
 
 from .schemas import Telemetry, ThermalState
+from .sensors import read_temperature
 
 
-def sample(node_id: str) -> dict:
+def sample(node_id: str, sensor: str = "") -> dict:
     cpu = psutil.cpu_percent(interval=1)
     vm = psutil.virtual_memory()
-    temp = None
-    try:
-        temps = psutil.sensors_temperatures()
-        for key in ("cpu_thermal", "coretemp", "Apple", "cpu-thermal"):
-            if key in temps and temps[key]:
-                temp = temps[key][0].current
-                break
-        if temp is None and temps:
-            first = next(iter(temps.values()))
-            if first:
-                temp = first[0].current
-    except Exception:
-        temp = None
-    if temp is None:
-        temp = 45.0 + (cpu / 100.0) * 30.0
+    reading = read_temperature(sensor or None, cpu)
+    temp = reading.celsius if reading.celsius is not None else 45.0 + (cpu / 100.0) * 30.0
     power = 15.0 + (cpu / 100.0) * 60.0
     redline = 95.0
     ratio = temp / redline
@@ -48,20 +36,22 @@ def sample(node_id: str) -> dict:
         bandwidth_mbps=0.0,
         load_avg=round(float(psutil.getloadavg()[0]) if hasattr(psutil, "getloadavg") else cpu/100*4, 2),
         thermal_state=state,
+        source=reading.source,
+        source_note=reading.note,
     )
     return t.model_dump(mode="json")
 
 
-async def run(tower_url: str, node_id: str, interval: float, token: str = ""):
+async def run(tower_url: str, node_id: str, interval: float, token: str = "", sensor: str = ""):
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     async with httpx.AsyncClient() as c:
         while True:
             try:
-                payload = sample(node_id)
+                payload = sample(node_id, sensor)
                 r = await c.post(f"{tower_url}/ingest/{node_id}", json=payload, headers=headers, timeout=10)
-                print(f"[{node_id}] push {r.status_code}")
+                print(f"[{node_id}] push {r.status_code} ({payload['source']} thermal)")
             except Exception as e:
                 print(f"[{node_id}] error: {e}")
             await asyncio.sleep(interval)
@@ -73,8 +63,9 @@ def main():
     p.add_argument("--node-id", default=platform.node())
     p.add_argument("--interval", type=float, default=5.0)
     p.add_argument("--token", default="")
+    p.add_argument("--sensor", default="", help="temperature backend: psutil, osx-cpu-temp, estimate")
     args = p.parse_args()
-    asyncio.run(run(args.tower, args.node_id, args.interval, args.token))
+    asyncio.run(run(args.tower, args.node_id, args.interval, args.token, args.sensor))
 
 
 if __name__ == "__main__":

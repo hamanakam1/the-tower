@@ -124,10 +124,40 @@ The honest problem is that **most of the mesh is still fiction**.
 > [`tests/test_storage.py`](../tests/test_storage.py). The rest are
 > scheduled in Horizon 0.
 
+### Horizon 0 progress
+
+Horizon 0 is the gate between "a prototype" and "something you may point at a
+real machine". Most of it is now closed. The table records what was done, not
+what was intended.
+
+| # | Work | State | Where |
+|---|---|---|---|
+| 0.1 | Single-source the version | **done** | `the_tower/__init__.py` → `/health`, dashboard footer, `pyproject` |
+| 0.2 | Config parity | **done** | `the_tower/config.py`; every documented key has a test in `tests/test_config.py` |
+| 0.3 | Shorthand clearance keeps `scope`, `weight.gpu_units`, `constraints` | **done** | `server.py`; covered by `tests/test_server.py` |
+| 0.4 | Pluggable sampler per node | **done** | `the_tower/sensors.py`, `NodeSpec.sampler` (`local` / `simulated` / `agent`) |
+| 0.5 | Kill guard: owned PIDs only, reason required, drain first | **done** | `core.py::kill`; `NodeStatus.DRAINING` |
+| 0.6 | Audit every decision | **done** | clearance, queue, preempt, kill, drain, node state, enforcement change |
+| 0.7 | SQLite migrations (numbered, forward) | **done** | `the_tower/storage.py::MIGRATIONS`; rollback is still to do |
+| 0.8 | Telemetry retention and rollup | **done** | `storage.py::rollup_telemetry`; 1m → 5m → 1h → 1d buckets |
+| 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
+| 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
+| 0.11 | Bounded rate-limit buckets, CORS allowlist | **done** | `server.py`; `TOWER_CORS_ORIGINS`, no wildcard default |
+| 0.12 | Fill the test gaps | **done** | 101 tests across policy, safety, replay, config, sensors, storage, server |
+| — | Graded safety ladder (§3.2) | **done** | `the_tower/safety.py`: admit → warn → throttle → drain → kill |
+| — | Pure decision core (§3.1) | **done** | `the_tower/policy.py`; the Tower drives it with a frozen snapshot |
+| — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`; the Tower recommends instead of acting |
+| — | Decision replay (§3.1) | **done** | `the_tower/replay.py`; `POST /replay`, `GET /decisions` |
+| — | Node lifecycle states | **done** | draining / cordoned / maintenance / offline / unknown |
+
+**Still open in Horizon 0:** migration *rollback* (only forward migrations
+exist), a real macOS CPU thermal sensor (the platform exposes none to
+unprivileged processes, so the local node's temperature is a labelled
+estimate), and the `simplify` pass over `core.py`.
+
 ---
 
 ## 3. How this software should be built
-
 Engineering rules that survive every phase. When two designs conflict, these
 win.
 
