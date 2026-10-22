@@ -135,13 +135,25 @@ reports anything real reports a temperature it guessed.
   never schedules the work twice, but the answer was kept only in an
   in-memory cache. A retry that arrived after a restart scheduled a second
   flight. The key and the answer are now persisted with the flight.
+- `anomaly.py` — the spike detector compared the newest temperature against
+  the mean of everything before it, so a machine that was warming up fired a
+  "thermal spike" on every sweep: nine false alarms in forty seconds. A
+  spike is now a sharp departure from the local level, the same condition
+  is held down for a minute, the simulated telemetry moves with thermal
+  inertia, and the time-to-redline forecast is never negative.
+- `agent.py` — the agent pushed telemetry at a node id the Tower had never
+  heard of and printed 404 forever. It can now register itself, describing
+  the machine it is running on.
 
 > These fixes are in this branch (except the dependency declaration, which
 > landed in the `v0.3.0` tag), with regression tests in
 > [`tests/test_storage.py`](../tests/test_storage.py),
 > [`tests/test_kill_authority.py`](../tests/test_kill_authority.py),
-> [`tests/test_anomaly.py`](../tests/test_anomaly.py) and
-> [`tests/test_idempotency.py`](../tests/test_idempotency.py). The rest are
+> [`tests/test_anomaly.py`](../tests/test_anomaly.py),
+> [`tests/test_false_positives.py`](../tests/test_false_positives.py),
+> [`tests/test_idempotency.py`](../tests/test_idempotency.py),
+> [`tests/test_replayability.py`](../tests/test_replayability.py) and
+> [`tests/test_onboarding.py`](../tests/test_onboarding.py). The rest are
 > scheduled in Horizon 0.
 
 ### Horizon 0 progress
@@ -163,7 +175,7 @@ what was intended.
 | 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
 | 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
 | 0.11 | Bounded rate-limit buckets, CORS allowlist | **done** | `server.py`; `TOWER_CORS_ORIGINS`, no wildcard default |
-| 0.12 | Fill the test gaps | **done** | 136 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority and idempotency |
+| 0.12 | Fill the test gaps | **done** | 156 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability and onboarding |
 | — | Graded safety ladder (§3.2) | **done** | `the_tower/safety.py`: admit → warn → throttle → drain → kill |
 | — | Pure decision core (§3.1) | **done** | `the_tower/policy.py`; the Tower drives it with a frozen snapshot |
 | — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`; the Tower recommends instead of acting |
@@ -185,6 +197,10 @@ Each one has a test.
 | A node with stale telemetry is `unknown` and is never scheduled onto | `policy.py::NodeView.accepts` | `tests/test_server.py` |
 | The time-to-redline forecast does not depend on the sweep interval | `anomaly.py::time_axis` | `tests/test_anomaly.py` |
 | A retried clearance request never schedules the work twice, even across a restart | `server.py::clearance_v2` | `tests/test_idempotency.py` |
+| Every clearance decision can be replayed from the Tower's own record | `core.py::replay_flight` | `tests/test_replayability.py` |
+| A warming machine is not a thermal spike | `anomaly.py::detect_spike` | `tests/test_false_positives.py` |
+| The same condition is not reported on every sweep | `anomaly.py::_should_report` | `tests/test_false_positives.py` |
+| A node can join the mesh in one command | `agent.py::node_spec` | `tests/test_onboarding.py` |
 | Every decision is in the hash-chained ledger | `core.py::_emit`, `storage.py::append_audit` | `tests/test_storage.py` |
 | A schema change ships with a forward migration and a rollback | `storage.py::MIGRATIONS`, `ROLLBACKS` | `tests/test_storage.py` |
 
