@@ -261,6 +261,16 @@ class TowerServer:
                 payload["comparison"] = compare(original, result)
             return JSONResponse(payload)
 
+        async def replay_flight(request):
+            """Replay a decision the Tower already made, from its own record."""
+            flight_id = request.path_params["flight_id"]
+            result = await tower.replay_flight(flight_id)
+            if result is None:
+                return JSONResponse(
+                    {"error": "no replayable decision recorded for this flight"},
+                    status_code=404)
+            return JSONResponse(result)
+
         async def kill(request):
             body = {}
             try:
@@ -426,6 +436,7 @@ class TowerServer:
             Route("/leases/{lease_id}", release_lease, methods=["DELETE"]),
             Route("/decisions", decisions),
             Route("/replay", replay_decision, methods=["POST"]),
+            Route("/replay/flight/{flight_id}", replay_flight, methods=["GET"]),
             Route("/kill/{container_id}", kill, methods=["POST"]),
             Route("/airspace", airspace),
             Route("/events", events),

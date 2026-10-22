@@ -435,7 +435,7 @@ class Tower:
                 await self._act_preempt(flight, decision)
 
             if decision.decision == ClearanceDecision.QUEUED:
-                return await self._act_queued(flight, decision)
+                return await self._act_queued(flight, decision, snap)
 
             best_node = self.nodes.get(decision.assigned_node) if decision.assigned_node else None
             if best_node is not None and self.anomaly.is_rogue_flight(best_node):
@@ -457,8 +457,9 @@ class Tower:
                 "reason": decision.reason,
                 "ladder": ladder_rung.value,
                 "admission": decision.to_dict(),
-                # the mesh state this decision was made against, so the
-                # decision can be replayed later
+                # the flight and the mesh state this decision was made
+                # against, so the decision can be replayed later
+                "flight": self.flight_record(flight),
                 "snapshot": snapshot_to_dict(snap),
             })
             node_name = best_node.spec.name if best_node else decision.assigned_node
@@ -516,7 +517,8 @@ class Tower:
             "target": decision.preempt_flight_id, "enforcement": "advisory",
         })
 
-    async def _act_queued(self, flight: Flight, decision: Decision) -> ClearanceResponse:
+    async def _act_queued(self, flight: Flight, decision: Decision,
+                          snapshot: Optional[MeshSnapshot] = None) -> ClearanceResponse:
         """Put a flight on the waiting list."""
         flight.status = FlightStatus.QUEUED
         self._queued_ids.add(flight.id)
@@ -534,6 +536,9 @@ class Tower:
             "kind": "clearance", "flight_id": flight.id, "callsign": flight.callsign,
             "decision": decision.decision.value, "reason": decision.reason,
             "admission": decision.to_dict(),
+            # a queued decision is a decision too, and it must be replayable
+            "flight": self.flight_record(flight),
+            "snapshot": snapshot_to_dict(snapshot) if snapshot else None,
         })
         return ClearanceResponse(decision=decision.decision, flight_id=flight.id,
                                 assigned_node=decision.assigned_node,
@@ -1157,6 +1162,71 @@ class Tower:
         if self.storage is None:
             return True
         return bool(await self._store(self.storage.verify_audit_chain))
+
+    # ---------------- replayable decisions ----------------
+    @staticmethod
+    def flight_record(flight: Flight) -> Dict[str, Any]:
+        """The fields a decision depends on, so it can be re-derived later.
+
+        A replay is only meaningful if the input is the input. Without this,
+        a caller has to reconstruct the flight by hand and any difference
+        looks like policy drift.
+        """
+        return {
+            "id": flight.id,
+            "task": flight.task,
+            "callsign": flight.callsign,
+            "requester": flight.requester,
+            "priority": int(flight.priority),
+            "weight": flight.weight.model_dump(),
+            "scope": list(flight.scope),
+            "preferred_node": flight.preferred_node,
+            "container_id": flight.container_id,
+            "rogue": flight.rogue,
+        }
+
+    def flight_from_record(self, record: Dict[str, Any]) -> Flight:
+        """Rebuild the flight a recorded decision was made about."""
+        return Flight(
+            id=record.get("id") or Flight(task="replay").id,
+            task=record.get("task", "replay"),
+            callsign=record.get("callsign", ""),
+            requester=record.get("requester", "replay"),
+            priority=int(record.get("priority", 2)),
+            weight=record.get("weight") or {},
+            scope=list(record.get("scope") or []),
+            preferred_node=record.get("preferred_node"),
+            container_id=record.get("container_id"),
+            rogue=bool(record.get("rogue", False)),
+        )
+
+    async def recorded_decision(self, flight_id: str) -> Optional[Dict[str, Any]]:
+        """The last recorded clearance decision for a flight."""
+        if self.storage is None:
+            return None
+        rows = await self._store(self.storage.load_decisions, 500) or []
+        for row in rows:
+            if row.get("flight_id") == flight_id:
+                return row
+        return None
+
+    async def replay_flight(self, flight_id: str) -> Optional[Dict[str, Any]]:
+        """Re-derive a recorded decision from the flight and the mesh state
+        it was made against."""
+        recorded = await self.recorded_decision(flight_id)
+        if not recorded:
+            return None
+        snapshot = recorded.get("snapshot")
+        flight_record = recorded.get("flight")
+        if not snapshot or not flight_record:
+            return None
+        flight = self.flight_from_record(flight_record)
+        result = replay(flight, snapshot)
+        payload = {"flight_id": flight_id, "replayed": result.to_dict()}
+        admission = recorded.get("admission")
+        if admission:
+            payload["comparison"] = compare(admission, result)
+        return payload
 
     def ingest_telemetry(self, node_id: str, telem: Telemetry) -> bool:
         node = self.nodes.get(node_id)
