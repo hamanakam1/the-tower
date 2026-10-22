@@ -98,13 +98,18 @@ same console on a narrow viewport:
 ## Core Systems
 
 - **Radar Sweep** - 5-second telemetry polling across all nodes (real psutil + simulated edge nodes)
+- **Pure Policy Core** - Admission is a pure function of a frozen snapshot (`the_tower/policy.py`): no I/O, no clock, replayable
+- **Safety Ladder** - Graded enforcement: admit → warn → throttle → drain → kill (`the_tower/safety.py`)
 - **Flight Clearance** - Dynamic dispatch algorithm based on resource weight and node scoring
 - **Anomaly Radar** - Predictive ML on thermal/memory/power trends (linear regression + z-score spikes)
 - **Anti-Air Battery** - Hard-kill switch for runaway processes and stale containers
 - **Scope Conflicts** - Resource-key conflict detection with priority preemption
 - **Priority Dispatch Queue** - Queued flights re-dispatched when capacity frees
 - **Container Registry** - Heartbeat-based liveness with auto-kill on timeout
-- **Persistence** - SQLite-backed flights, events, telemetry, audit hash chain
+- **Freshness** - Stale telemetry makes a node `unknown`, and unknown nodes are never scheduled onto
+- **Advisory Mode** - Per-node opt-in: the Tower recommends instead of acting
+- **Explainability** - Every clearance carries the node state it saw, the score of every candidate and a policy version
+- **Persistence** - SQLite-backed flights, events, telemetry, audit hash chain, versioned migrations
 - **Live Push** - WebSocket airspace broadcasts
 - **Auth** - Optional bearer token for mutating endpoints
 - **Metrics** - Prometheus `/metrics` endpoint
@@ -160,6 +165,11 @@ volume. See the [package on GitHub](https://github.com/hamanakam1/the-tower/pkgs
 - `WS /ws` - Live airspace push
 - `GET /metrics` - Prometheus metrics
 - `GET /flights/:id` - Flight detail + related events
+- `POST /clearance/v2` - Idempotent clearance contract (202 Accepted)
+- `GET /decision/last` - The last admission decision, with its explainability block
+- `GET /safety/ladder` - Enforcement ladder state per node
+- `POST /nodes/:id/enforcement` - Switch a node between `advisory` and `enforce`
+- `GET /history/:node` - Recent telemetry samples for a node
 
 ## Visualization
 
@@ -184,10 +194,12 @@ and the machine-readable diagram source is
 Working prototype - hardware ATC with telemetry, clearance dispatch, anomaly detection, and kill-switch.
 
 **Read this before trusting it with real hardware.** Two of the three mesh
-nodes are still simulated, the kill path will `SIGKILL` any numeric container
-id, and the audit chain does not yet record admission decisions. The
-[long-term plan](docs/roadmap.md) lists every gap with the horizon that
-closes it.
+nodes are still simulated, and macOS exposes no CPU thermal sensor through
+`psutil` — the local node's temperature is an estimate from CPU load, and the
+dashboard says so on every sample. The kill path only signals processes the
+Tower has registered, and the audit chain records admission decisions. The
+[long-term plan](docs/roadmap.md) lists every remaining gap with the horizon
+that closes it.
 
 ## License
 

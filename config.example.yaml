@@ -19,6 +19,9 @@ nodes:
     network_capacity_mbps: 10000.0
     thermal_mass: 4.0
     location: local
+    simulate: true          # set false once a node agent reports for this node
+    staleness_budget_s: 30
+    enforcement: enforce    # advisory | enforce
   - id: pi-cluster
     name: Raspberry Pi 5 Cluster
     role: Drone Swarm
@@ -32,6 +35,9 @@ nodes:
     network_capacity_mbps: 1000.0
     thermal_mass: 1.2
     location: edge
+    simulate: true
+    staleness_budget_s: 30
+    enforcement: enforce
   - id: trailer-hpc
     name: Mobile HPC Trailer
     role: Off-grid Compute
@@ -45,3 +51,6 @@ nodes:
     network_capacity_mbps: 500.0
     thermal_mass: 3.0
     location: off-grid
+    simulate: true
+    staleness_budget_s: 30
+    enforcement: enforce
