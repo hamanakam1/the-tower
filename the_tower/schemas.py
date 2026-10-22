@@ -138,6 +138,8 @@ class NodeSpec(BaseModel):
     location: str = "local"
     simulate: bool = Field(default=True, description="Whether radar simulates telemetry for this node")
     staleness_budget_s: int = Field(default=30, gt=0, description="Seconds before telemetry is considered stale")
+    enforcement: str = Field(default="enforce", pattern="^(advisory|enforce)$",
+                             description="'advisory' recommends but never kills; 'enforce' acts")
 
 
 class Node(BaseModel):

@@ -245,6 +245,16 @@ class TowerServer:
                 return JSONResponse({"error": "not found"}, status_code=404)
             return JSONResponse({"ok": True})
 
+        async def set_enforcement(request):
+            node_id = request.path_params["node_id"]
+            body = await request.json()
+            mode = body.get("mode", "enforce")
+            ok = tower.set_enforcement(node_id, mode)
+            if not ok:
+                return JSONResponse({"error": "node not found or bad mode"}, status_code=400)
+            node = tower.get_node(node_id)
+            return JSONResponse({"ok": True, "node": node.model_dump(mode="json")})
+
         async def audit_verify(request):
             return JSONResponse({"valid": await tower.verify_audit_async()})
 
@@ -325,6 +335,7 @@ class TowerServer:
             Route("/ingest/{node_id}", ingest, methods=["POST"]),
             Route("/nodes", register_node, methods=["POST"]),
             Route("/nodes/{node_id}", unregister_node, methods=["DELETE"]),
+            Route("/nodes/{node_id}/enforcement", set_enforcement, methods=["POST"]),
             Route("/audit/verify", audit_verify),
             Route("/audit", audit_log, methods=["POST"]),
             Route("/conflicts", conflicts),

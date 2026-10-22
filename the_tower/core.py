@@ -188,6 +188,14 @@ class Tower:
         node = self.nodes.get(node_id)
         if not node:
             return
+        if node.spec.enforcement != "enforce":
+            # advisory node: recommend the kill, do not perform it
+            self._emit(EventKind.REDLINE, node_id=node_id,
+                       message=(f"ADVISORY: {node.spec.name} at redline - "
+                                f"recommend killing {len(node.active_flights)} flight(s)"),
+                       severity="critical",
+                       data={"recommendation": "kill", "flights": list(node.active_flights)})
+            return
         for fid in list(node.active_flights):
             flight = self.flights.get(fid)
             if flight and flight.status == FlightStatus.IN_FLIGHT:
@@ -342,12 +350,23 @@ class Tower:
                 return ClearanceResponse(decision=decision.decision, flight_id=flight.id,
                                         reason=decision.reason)
 
-            # scope conflict: preempt the incumbent if we outrank it
+            # scope conflict: preempt the incumbent if we outrank it.
+            # Preemption is an enforcement action: in advisory mode the
+            # Tower recommends and records, it does not revoke clearance.
             if decision.preempt_flight_id:
                 existing = self.flights.get(decision.preempt_flight_id)
-                callsign = existing.callsign if existing else decision.preempt_flight_id
-                await self._preempt(decision.preempt_flight_id,
-                                    f"preempted by {flight.callsign} (higher priority)")
+                target_node = self.nodes.get(existing.assigned_node) if existing else None
+                enforcing = (target_node.spec.enforcement == "enforce") if target_node else True
+                if enforcing:
+                    await self._preempt(decision.preempt_flight_id,
+                                        f"preempted by {flight.callsign} (higher priority)")
+                else:
+                    self._emit(EventKind.ANOMALY, node_id=decision.preempt_flight_id,
+                               flight_id=flight.id,
+                               message=(f"ADVISORY: would preempt {existing.callsign if existing else decision.preempt_flight_id} "
+                                        f"for {flight.callsign} - node is advisory-only"),
+                               severity="warn",
+                               data={"recommendation": "preempt", "target": decision.preempt_flight_id})
 
             # queued: no capacity, or a scope conflict we do not outrank
             if decision.decision == ClearanceDecision.QUEUED:
@@ -411,20 +430,26 @@ class Tower:
                                    severity=assessment.severity,
                                    data=assessment.to_dict())
                     if assessment.ladder == Ladder.DRAIN:
-                        # node is heading for redline: do not admit this flight
-                        flight.status = FlightStatus.QUEUED
-                        self._queued_ids.add(flight.id)
-                        flight.takeoff_at = None
-                        flight.cleared_at = None
-                        flight.reason = f"node draining: {assessment.reason}"
-                        if self.storage is not None:
-                            await self._store(self.storage.upsert_flight, flight)
-                        return ClearanceResponse(decision=ClearanceDecision.QUEUED,
-                                                flight_id=flight.id,
-                                                assigned_node=decision.assigned_node,
-                                                reason=flight.reason,
-                                                estimated_wait_s=60.0,
-                                                admission=decision.to_dict())
+                        if best_node.spec.enforcement == "enforce":
+                            # node is heading for redline: do not admit this flight
+                            flight.status = FlightStatus.QUEUED
+                            self._queued_ids.add(flight.id)
+                            flight.takeoff_at = None
+                            flight.cleared_at = None
+                            flight.reason = f"node draining: {assessment.reason}"
+                            if self.storage is not None:
+                                await self._store(self.storage.upsert_flight, flight)
+                            return ClearanceResponse(decision=ClearanceDecision.QUEUED,
+                                                    flight_id=flight.id,
+                                                    assigned_node=decision.assigned_node,
+                                                    reason=flight.reason,
+                                                    estimated_wait_s=60.0,
+                                                    admission=decision.to_dict())
+                        # advisory mode: recommend draining, but do not block the mesh
+                        self._emit(EventKind.ANOMALY, node_id=best_node.spec.id,
+                                   flight_id=flight.id,
+                                   message=f"ADVISORY: recommend draining {best_node.spec.name} - {assessment.reason}",
+                                   severity="warn", data=assessment.to_dict())
                     if assessment.ladder == Ladder.THROTTLE:
                         factor = THROTTLE_FACTOR.get(Ladder.THROTTLE, 0.5)
                         throttled = throttled_weight(flight, factor)
@@ -587,6 +612,32 @@ class Tower:
         self._emit(EventKind.NODE_ONLINE, node_id=spec.id,
                    message=f"Node registered: {spec.name}", severity="info")
         return node
+
+    def set_enforcement(self, node_id: str, mode: str) -> bool:
+        """Switch a node between 'advisory' and 'enforce'.
+
+        This is an auditable, per-node opt-in. The change is recorded in the
+        audit chain so "why was this flight not stopped?" has an answer.
+        """
+        node = self.nodes.get(node_id)
+        if node is None:
+            return False
+        if mode not in ("advisory", "enforce"):
+            return False
+        previous = node.spec.enforcement
+        node.spec.enforcement = mode
+        if self.storage is not None:
+            try:
+                self.storage.upsert_node_spec(node_id, node.spec.model_dump_json())
+            except Exception as e:
+                logger.warning("node spec persist failed: %s", e)
+        self._emit(EventKind.ANOMALY, node_id=node_id,
+                   message=f"Enforcement mode for {node.spec.name}: {previous} -> {mode}",
+                   severity="warn" if mode == "enforce" else "info",
+                   data={"previous": previous, "mode": mode})
+        self.log_audit({"kind": "enforcement_change", "node_id": node_id,
+                        "previous": previous, "mode": mode})
+        return True
 
     def unregister_node(self, node_id: str) -> bool:
         if node_id not in self.nodes:

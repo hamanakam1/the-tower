@@ -191,6 +191,33 @@ async def test_dispatch_queue_serves_highest_priority_first():
 
 
 @pytest.mark.asyncio
+async def test_advisory_node_does_not_auto_kill(tower):
+    from the_tower.schemas import Flight, ResourceWeight, ClearanceRequest
+    node = tower.get_node("m3max")
+    node.spec.enforcement = "advisory"
+    f = Flight(task="sticky", weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=600))
+    await tower.request_clearance(ClearanceRequest(flight=f))
+    assert f.status.value == "in_flight"
+    # force a redline
+    node.telemetry.temperature_c = node.spec.redline_temp_c + 5
+    node.telemetry.thermal_state = __import__(
+        "the_tower.schemas", fromlist=["ThermalState"]).ThermalState.CRITICAL
+    node.history.append(node.telemetry)
+    await tower._auto_kill_on_redline(node.spec.id)
+    # advisory mode recommends, it does not act
+    assert f.status.value == "in_flight"
+    assert any("ADVISORY" in e.message for e in tower.events)
+
+
+@pytest.mark.asyncio
+async def test_set_enforcement(tower):
+    assert tower.set_enforcement("m3max", "advisory") is True
+    assert tower.get_node("m3max").spec.enforcement == "advisory"
+    assert tower.set_enforcement("m3max", "bogus") is False
+    assert tower.set_enforcement("nope", "advisory") is False
+
+
+@pytest.mark.asyncio
 async def test_node_registration(tower):
     from the_tower.schemas import NodeSpec
     spec = NodeSpec(id="newnode", name="New Node", role="test", specs="x", constraints="y",
