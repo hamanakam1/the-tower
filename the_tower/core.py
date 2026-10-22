@@ -347,6 +347,26 @@ class Tower:
             for old in list(self._idempotency.keys())[:256]:
                 self._idempotency.pop(old, None)
 
+    def flight_by_idempotency_key(self, key: str) -> Optional[Flight]:
+        """Find a flight that was already answered for this idempotency key.
+
+        The in-memory cache does not survive a restart, so a retried request
+        after a restart would schedule the work a second time. The key is
+        stored on the flight, which is persisted, so the answer does.
+        """
+        if not key:
+            return None
+        for flight in self.flights.values():
+            if (flight.metadata or {}).get("idempotency_key") == key:
+                return flight
+        return None
+
+    async def persist_flight(self, flight: Flight):
+        """Write a flight to the store."""
+        if self.storage is None:
+            return
+        await self._store(self.storage.upsert_flight, flight)
+
     def snapshot(self) -> MeshSnapshot:
         """Freeze the observed world for a pure admission decision."""
         now = datetime.now(timezone.utc)

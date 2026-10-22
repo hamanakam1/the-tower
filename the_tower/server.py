@@ -165,6 +165,16 @@ class TowerServer:
                 cached = tower.idempotent_result(key)
                 if cached is not None:
                     return JSONResponse(cached, status_code=200)
+                # The in-memory cache does not survive a restart. The key is
+                # stored on the flight, which is persisted, so a retry after a
+                # restart still gets the original answer instead of a second
+                # flight.
+                existing = tower.flight_by_idempotency_key(key)
+                if existing is not None:
+                    stored = (existing.metadata or {}).get("idempotency_response")
+                    if stored:
+                        tower.remember_idempotent(key, stored)
+                        return JSONResponse(stored, status_code=200)
             from .schemas import Flight, ResourceWeight, FlightPriority
             constraints = body.get("constraints") or {}
             flight = Flight(
@@ -180,7 +190,11 @@ class TowerServer:
             resp = await tower.request_clearance(ClearanceRequest(flight=flight))
             payload = resp.model_dump(mode="json")
             if key:
+                payload = dict(payload)
+                payload["idempotency_key"] = key
+                flight.metadata = {**flight.metadata, "idempotency_response": payload}
                 tower.remember_idempotent(key, payload)
+                await tower.persist_flight(flight)
             status = 202 if resp.decision.value == "cleared" else 200
             return JSONResponse(payload, status_code=status)
 
