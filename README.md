@@ -1,16 +1,38 @@
 # The Tower
 
 ```text
+              |
+             /\
+            /  \
+           /    \
+          |------|
+          | o  o |
+          |  ||  |
+          |------|
+         /        \
+        /          \
+       /            \
+      |______________|
+             |
+             |
+             |
+      _______|_______
+     |               |
+     |               |
+     |_______________|
+```
+
+**Hardware Air Traffic Control for the Autonomous Mesh**
+
+The Tower sits above the execution layer, monitors the physical airspace, clears compute tasks for takeoff, and ruthlessly shoots down rogue flights before they melt a motherboard.
+
+```text
 TTTTT H   H EEEEE TTTTT  OOO  W   W EEEEE RRRR
   T   H   H E       T   O   O W   W E     R   R
   T   HHHHH EEEE    T   O   O W W W EEEE  RRRR
   T   H   H E       T   O   O WW WW E     R  R
   T   H   H EEEEE   T    OOO  W   W EEEEE R   R
 ```
-
-**Hardware Air Traffic Control for the Autonomous Mesh**
-
-The Tower sits above the execution layer, monitors the physical airspace, clears compute tasks for takeoff, and ruthlessly shoots down rogue flights before they melt a motherboard.
 
 ## Purpose
 
@@ -35,10 +57,6 @@ Unlike cloud-native applications that assume infinite compute, The Tower operate
 - **Anomaly Radar** - Predictive ML on thermal/memory trends
 - **Anti-Air Battery** - Hard-kill switch for runaway processes
 
-## Status
-
-Early scaffolding - architecture design phase.
-
 ## Hardware Topology
 
 | Node | Role | Specs | Constraints |
@@ -47,12 +65,33 @@ Early scaffolding - architecture design phase.
 | Raspberry Pi 5 Cluster | Drone Swarm | Multiple nodes | 80°C redline, limited RAM/power |
 | Mobile HPC Trailer | Off-grid Compute | Solar + battery banks | Constrained by SoC/battery discharge |
 
+## Quick Start
+
+```bash
+pip install -e .
+the-tower serve            # API + dashboard on http://127.0.0.1:8765
+the-tower radar            # one-shot telemetry sweep
+the-tower status           # node health
+```
+
 ## API Endpoints
 
 - `POST /clearance` - Request flight clearance for a task
 - `GET /radar` - Current mesh telemetry snapshot
 - `GET /status/:node` - Per-node health details
 - `POST /kill/:container` - Emergency kill (internal use)
+- `GET /airspace` - Full airspace snapshot (nodes, flights, events, stats)
+- `GET /events` - Recent tower events
+- `GET /flights` - All flights
+- `GET /trend/:node` - Thermal/memory trend analysis
+
+## Visualization
+
+Open the dashboard at `http://127.0.0.1:8765/` for the live radar, node health, flight board, and anti-air battery controls.
+
+## Status
+
+Working prototype - hardware ATC with telemetry, clearance dispatch, anomaly detection, and kill-switch.
 
 ## License
 

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>The Tower — Hardware Air Traffic Control</title>
+<style>
+  :root {
+    --bg: #0a0f14;
+    --panel: #111922;
+    --panel2: #0d1520;
+    --border: #1f2a36;
+    --fg: #cfe3f2;
+    --muted: #6b7f93;
+    --green: #39ff88;
+    --amber: #ffb347;
+    --red: #ff4d4d;
+    --blue: #4da6ff;
+    --cyan: #5eead4;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; }
+  body { min-height: 100vh; overflow-x: hidden; }
+  header { padding: 18px 24px 8px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+  .title { font-size: 22px; font-weight: 700; letter-spacing: 2px; color: var(--green); }
+  .subtitle { color: var(--muted); font-size: 12px; letter-spacing: 1px; }
+  .ascii-tower { color: var(--green); font-size: 11px; line-height: 1.05; white-space: pre;
+    text-shadow: 0 0 8px rgba(57,255,136,0.35); }
+  .grid { display: grid; grid-template-columns: 320px 1fr 360px; gap: 14px; padding: 14px; }
+  @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; }
+  .panel h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 1.5px; color: var(--amber);
+    text-transform: uppercase; }
+  canvas { width: 100%; height: 320px; background: #050a0f; border-radius: 6px;
+    border: 1px solid var(--border); display: block; }
+  .node-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; margin-bottom: 10px; }
+  .node-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .node-name { font-weight: 700; color: var(--cyan); }
+  .badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; border: 1px solid;
+    text-transform: uppercase; letter-spacing: 1px; }
+  .badge.online { color: var(--green); border-color: var(--green); }
+  .badge.degraded { color: var(--amber); border-color: var(--amber); }
+  .badge.overloaded { color: var(--red); border-color: var(--red); }
+  .badge.redline { color: #fff; background: var(--red); border-color: var(--red); }
+  .badge.offline { color: var(--muted); border-color: var(--muted); }
+  .bar { height: 8px; background: #0a141c; border-radius: 4px; overflow: hidden; margin: 4px 0; position: relative; }
+  .bar > span { display: block; height: 100%; transition: width 0.4s; }
+  .bar.cpu > span { background: linear-gradient(90deg, #4da6ff, #39ff88); }
+  .bar.mem > span { background: linear-gradient(90deg, #a78bfa, #ff4d4d); }
+  .bar.temp > span { background: linear-gradient(90deg, #39ff88, #ffb347, #ff4d4d); }
+  .bar.bat > span { background: linear-gradient(90deg, #facc15, #39ff88); }
+  .row { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+  .row b { color: var(--fg); }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--amber); text-transform: uppercase; font-size: 10px; letter-spacing: 1px; }
+  tr.shot { color: var(--red); }
+  tr.landed { color: var(--muted); }
+  tr.inflight { color: var(--green); }
+  .events { max-height: 340px; overflow-y: auto; font-size: 11px; }
+  .evt { padding: 4px 6px; border-left: 3px solid var(--border); margin-bottom: 4px;
+    background: #0a141c; border-radius: 3px; }
+  .evt.info { border-color: var(--blue); }
+  .evt.warn { border-color: var(--amber); }
+  .evt.critical { border-color: var(--red); background: #1a0a0a; }
+  .evt .ts { color: var(--muted); font-size: 10px; }
+  .controls { display: flex; flex-direction: column; gap: 8px; }
+  .controls input, .controls select, .controls button { font-family: inherit; font-size: 12px;
+    padding: 7px 9px; background: #0a141c; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 5px; }
+  .controls button { cursor: pointer; background: var(--green); color: #0a0f14; font-weight: 700;
+    border: none; letter-spacing: 1px; }
+  .controls button.kill { background: var(--red); color: #fff; }
+  .controls button.warn { background: var(--amber); color: #0a0f14; }
+  .stat-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 6px; }
+  .stat { background: var(--panel2); border: 1px solid var(--border); border-radius: 5px;
+    padding: 8px; text-align: center; }
+  .stat .v { font-size: 18px; font-weight: 700; color: var(--green); }
+  .stat .l { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  footer { padding: 10px 24px; border-top: 1px solid var(--border); color: var(--muted);
+    font-size: 10px; display: flex; justify-content: space-between; }
+  .legend span { margin-right: 12px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <pre class="ascii-tower">
+              |
+             /\
+            /  \
+           /    \
+          |------|
+          | o  o |
+          |  ||  |
+          |------|
+         /        \
+        /          \
+       /            \
+      |______________|
+             |
+             |
+             |
+      _______|_______
+     |               |
+     |               |
+     |_______________|
+  </pre>
+  <div>
+    <div class="title">THE TOWER</div>
+    <div class="subtitle">Hardware Air Traffic Control for the Autonomous Mesh</div>
+    <div class="subtitle" style="margin-top:4px;">Sits above the execution layer. Monitors the physical airspace. Clears compute tasks for takeoff. Shoots down rogue flights before they melt a motherboard.</div>
+  </div>
+</header>
+
+<div class="grid">
+  <!-- Left: nodes -->
+  <div>
+    <div class="panel">
+      <h3>Radar</h3>
+      <canvas id="radar" width="640" height="640"></canvas>
+      <div class="stat-grid" style="margin-top:8px;" id="stats"></div>
+    </div>
+    <div class="panel" style="margin-top:14px;">
+      <h3>Nodes</h3>
+      <div id="nodes"></div>
+    </div>
+  </div>
+
+  <!-- Middle: flights + controls -->
+  <div>
+    <div class="panel">
+      <h3>Flight Board</h3>
+      <table>
+        <thead><tr><th>Callsign</th><th>Task</th><th>Node</th><th>Prio</th><th>Status</th></tr></thead>
+        <tbody id="flights"></tbody>
+      </table>
+    </div>
+    <div class="panel" style="margin-top:14px;">
+      <h3>Clearance Request</h3>
+      <div class="controls">
+        <input id="task" placeholder="Task / true goal" />
+        <input id="callsign" placeholder="Callsign (optional)" />
+        <div style="display:flex;gap:6px;">
+          <select id="priority">
+            <option value="0">P0 Critical</option>
+            <option value="1">P1 High</option>
+            <option value="2" selected>P2 Normal</option>
+            <option value="3">P3 Low</option>
+          </select>
+          <select id="node">
+            <option value="">auto</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <input id="cpu" placeholder="CPU cores" value="2" />
+          <input id="mem" placeholder="Memory GB" value="4" />
+          <input id="dur" placeholder="Duration s" value="20" />
+        </div>
+        <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="rogue" style="width:auto;"/> Rogue flight (will be shot down)
+        </label>
+        <button onclick="requestClearance()">Request Clearance</button>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:14px;">
+      <h3>Anti-Air Battery</h3>
+      <div class="controls">
+        <input id="killTarget" placeholder="Container ID or PID to kill" />
+        <input id="killReason" placeholder="Reason" value="manual kill" />
+        <button class="kill" onclick="doKill()">FIRE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: events -->
+  <div>
+    <div class="panel">
+      <h3>Event Log</h3>
+      <div class="events" id="events"></div>
+    </div>
+    <div class="panel" style="margin-top:14px;">
+      <h3>Trends</h3>
+      <div id="trends"></div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div>The Tower v0.2.0 · Hardware ATC · <span id="clock"></span></div>
+  <div class="legend">
+    <span><span class="dot" style="background:var(--green)"></span>Cleared</span>
+    <span><span class="dot" style="background:var(--amber)"></span>Queued</span>
+    <span><span class="dot" style="background:var(--red)"></span>Shot down</span>
+    <span><span class="dot" style="background:var(--muted)"></span>Landed</span>
+  </div>
+</footer>
+
+<script>
+const API = "";
+let state = null;
+let sweepAngle = 0;
+const blips = [];
+
+async function fetchJSON(path, opts) {
+  const r = await fetch(API + path, opts);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    state = await fetchJSON("/airspace");
+    renderNodes(state.nodes);
+    renderFlights(state.flights);
+    renderStats(state.stats);
+    renderNodeSelect(state.nodes);
+    const ev = await fetchJSON("/events?limit=60");
+    renderEvents(ev.events);
+    renderTrends(state.nodes);
+  } catch (e) { console.error(e); }
+}
+
+function renderStats(s) {
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><div class="v">${s.nodes_online}/${s.nodes_total}</div><div class="l">Nodes Online</div></div>
+    <div class="stat"><div class="v">${s.flights_in_flight}</div><div class="l">In Flight</div></div>
+    <div class="stat"><div class="v">${s.flights_queued}</div><div class="l">Queued</div></div>
+    <div class="stat"><div class="v">${s.flights_shot_down}</div><div class="l">Shot Down</div></div>
+  `;
+}
+
+function statusClass(s){ return s.toLowerCase().replace("_",""); }
+
+function renderNodes(nodes) {
+  const el = document.getElementById("nodes");
+  el.innerHTML = nodes.map(n => {
+    const t = n.telemetry;
+    const free = { cpu: n.spec.cpu_cores*(1-t.cpu_percent/100), mem: n.spec.memory_gb*(1-t.memory_percent/100) };
+    const tempPct = Math.min(100, t.temperature_c / n.spec.redline_temp_c * 100);
+    return `<div class="node-card">
+      <div class="node-head">
+        <span class="node-name">${n.spec.name}</span>
+        <span class="badge ${statusClass(n.status)}">${n.status}</span>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:6px;">${n.spec.role} · ${n.spec.location}</div>
+      <div class="row"><span>CPU</span><b>${t.cpu_percent}%</b></div>
+      <div class="bar cpu"><span style="width:${t.cpu_percent}%"></span></div>
+      <div class="row"><span>MEM</span><b>${t.memory_percent}% (${t.memory_used_gb}/${t.memory_total_gb}GB)</b></div>
+      <div class="bar mem"><span style="width:${t.memory_percent}%"></span></div>
+      <div class="row"><span>TEMP</span><b>${t.temperature_c}°C / ${n.spec.redline_temp_c}°C</b></div>
+      <div class="bar temp"><span style="width:${tempPct}%"></span></div>
+      <div class="row"><span>PWR</span><b>${t.power_watts}W / ${n.spec.max_power_watts}W</b></div>
+      <div class="row"><span>LOAD</span><b>${t.load_avg} · ${n.active_flights.length} flights</b></div>
+      ${t.battery_percent!=null ? `<div class="row"><span>BAT</span><b>${t.battery_percent}%</b></div><div class="bar bat"><span style="width:${t.battery_percent}%"></span></div>` : ""}
+      ${t.solar_input_watts!=null ? `<div class="row"><span>SOLAR</span><b>${t.solar_input_watts}W</b></div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function renderFlights(flights) {
+  const el = document.getElementById("flights");
+  const sorted = [...flights].sort((a,b)=> new Date(b.submitted_at)-new Date(a.submitted_at));
+  el.innerHTML = sorted.map(f => {
+    const cls = f.status==="shot_down"?"shot": f.status==="landed"?"landed": f.status==="in_flight"?"inflight":"";
+    const prio = "P"+f.priority;
+    return `<tr class="${cls}">
+      <td>${f.callsign}</td>
+      <td title="${f.task}">${f.task.slice(0,42)}</td>
+      <td>${f.assigned_node||"—"}</td>
+      <td>${prio}</td>
+      <td>${f.status}${f.reason? " — "+f.reason.slice(0,40):""}</td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="5" style="color:var(--muted);text-align:center;">No flights</td></tr>`;
+}
+
+function renderEvents(evs) {
+  const el = document.getElementById("events");
+  el.innerHTML = evs.slice().reverse().map(e => `
+    <div class="evt ${e.severity}">
+      <div class="ts">${new Date(e.timestamp).toLocaleTimeString()} · ${e.kind}</div>
+      <div>${e.message}</div>
+    </div>`).join("");
+}
+
+function renderNodeSelect(nodes) {
+  const sel = document.getElementById("node");
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">auto</option>` + nodes.map(n=>`<option value="${n.spec.id}">${n.spec.name}</option>`).join("");
+  sel.value = cur;
+}
+
+async function renderTrends(nodes) {
+  const el = document.getElementById("trends");
+  const parts = [];
+  for (const n of nodes) {
+    try {
+      const t = await fetchJSON(`/trend/${n.spec.id}`);
+      parts.push(`<div style="margin-bottom:8px;font-size:11px;">
+        <b style="color:var(--cyan)">${n.spec.name}</b><br/>
+        temp slope: ${t.temp_slope}°C/sample · mem slope: ${t.mem_slope}%/sample<br/>
+        ${t.secs_to_redline!=null ? `<span style="color:var(--amber)">ETA redline: ${t.secs_to_redline}s</span>` : "stable"}
+      </div>`);
+    } catch(e){}
+  }
+  el.innerHTML = parts.join("");
+}
+
+async function requestClearance() {
+  const task = document.getElementById("task").value.trim() || "unnamed task";
+  const callsign = document.getElementById("callsign").value.trim();
+  const priority = parseInt(document.getElementById("priority").value);
+  const preferred_node = document.getElementById("node").value || null;
+  const rogue = document.getElementById("rogue").checked;
+  const cpu = parseFloat(document.getElementById("cpu").value) || 2;
+  const mem = parseFloat(document.getElementById("mem").value) || 4;
+  const dur = parseFloat(document.getElementById("dur").value) || 20;
+  const body = {
+    task, callsign, priority, preferred_node, rogue,
+    weight: { cpu_cores: cpu, memory_gb: mem, duration_est_s: dur, network_mbps: 5, thermal_budget_c: 5 },
+  };
+  const r = await fetchJSON("/clearance", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  console.log(r);
+  await refresh();
+}
+
+async function doKill() {
+  const target = document.getElementById("killTarget").value.trim();
+  if (!target) return;
+  const reason = document.getElementById("killReason").value.trim() || "manual kill";
+  const r = await fetchJSON(`/kill/${encodeURIComponent(target)}`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({reason}) });
+  console.log(r);
+  await refresh();
+}
+
+// Radar canvas animation
+const canvas = document.getElementById("radar");
+const ctx = canvas.getContext("2d");
+function drawRadar() {
+  const w = canvas.width, h = canvas.height;
+  const cx = w/2, cy = h/2, R = Math.min(w,h)/2 - 10;
+  ctx.fillStyle = "#050a0f";
+  ctx.fillRect(0,0,w,h);
+  // rings
+  ctx.strokeStyle = "rgba(57,255,136,0.15)";
+  ctx.lineWidth = 1;
+  for (let i=1;i<=4;i++){
+    ctx.beginPath(); ctx.arc(cx,cy,R*i/4,0,Math.PI*2); ctx.stroke();
+  }
+  // crosshair
+  ctx.beginPath(); ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R); ctx.stroke();
+  // sweep
+  sweepAngle += 0.03;
+  const grad = ctx.createRadialGradient(cx,cy,0,cx,cy,R);
+  grad.addColorStop(0,"rgba(57,255,136,0.0)");
+  grad.addColorStop(1,"rgba(57,255,136,0.0)");
+  ctx.save();
+  ctx.translate(cx,cy);
+  ctx.rotate(sweepAngle);
+  ctx.fillStyle = "rgba(57,255,136,0.12)";
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.arc(0,0,R,-0.3,0); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "rgba(57,255,136,0.9)";
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(R,0); ctx.stroke();
+  ctx.restore();
+  // blips for nodes
+  if (state && state.nodes) {
+    const n = state.nodes.length;
+    state.nodes.forEach((nd, i) => {
+      const ang = (i/n)*Math.PI*2 + 0.5;
+      const r = R*0.55;
+      const x = cx + Math.cos(ang)*r;
+      const y = cy + Math.sin(ang)*r;
+      const hot = nd.telemetry.temperature_c / nd.spec.redline_temp_c;
+      ctx.fillStyle = hot>0.9 ? "#ff4d4d" : hot>0.75 ? "#ffb347" : "#39ff88";
+      ctx.beginPath(); ctx.arc(x,y,6,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#cfe3f2"; ctx.font="10px monospace"; ctx.fillText(nd.spec.id, x+8, y+3);
+    });
+  }
+  // blips for in-flight flights (orbiting)
+  if (state && state.flights) {
+    state.flights.filter(f=>f.status==="in_flight").forEach((f, i) => {
+      const ang = sweepAngle*1.2 + i*1.3;
+      const r = R*0.8;
+      const x = cx + Math.cos(ang)*r;
+      const y = cy + Math.sin(ang)*r;
+      ctx.fillStyle = "#4da6ff";
+      ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill();
+    });
+  }
+  // center tower dot
+  ctx.fillStyle = "#ffb347";
+  ctx.beginPath(); ctx.arc(cx,cy,5,0,Math.PI*2); ctx.fill();
+  requestAnimationFrame(drawRadar);
+}
+drawRadar();
+
+setInterval(refresh, 2000);
+refresh();
+
+function tickClock(){ document.getElementById("clock").textContent = new Date().toLocaleTimeString(); }
+setInterval(tickClock,1000); tickClock();
+</script>
+</body>
+</html>
