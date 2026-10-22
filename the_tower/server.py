@@ -108,7 +108,7 @@ class TowerServer:
         async def clearance(request):
             body = await request.json()
             # allow shorthand: if body has "task" instead of full flight, build one
-            if "flight" not in body:
+            if "flight" not in body and "work_package" not in body:
                 from .schemas import Flight, ResourceWeight, FlightPriority
                 flight = Flight(
                     task=body.get("task", body.get("true_goal", "unnamed task")),
@@ -119,6 +119,29 @@ class TowerServer:
                     preferred_node=body.get("preferred_node"),
                     rogue=bool(body.get("rogue", False)),
                     callsign=body.get("callsign", ""),
+                    scope=body.get("scope", []),
+                )
+                req = ClearanceRequest(flight=flight, dag=body.get("dag"), force=bool(body.get("force", False)))
+            elif "work_package" in body:
+                from .schemas import Flight, ResourceWeight, FlightPriority
+                wp = body["work_package"]
+                # map DistilledWorkPackage -> Flight
+                prio = wp.get("suggested_priority", 2)
+                tokens = wp.get("estimated_tokens", 8000)
+                dur = max(5.0, tokens / 100.0)
+                flight = Flight(
+                    task=wp.get("true_goal", wp.get("true_goal_summary", "work package")),
+                    requester=body.get("requester", "el-destilador"),
+                    priority=FlightPriority(prio if prio in (0,1,2,3) else 2),
+                    weight=ResourceWeight(
+                        cpu_cores=body.get("weight", {}).get("cpu_cores", 2),
+                        memory_gb=body.get("weight", {}).get("memory_gb", 4),
+                        duration_est_s=dur,
+                    ),
+                    container_id=body.get("container_id"),
+                    preferred_node=body.get("preferred_node"),
+                    scope=wp.get("suggested_scope", []),
+                    metadata={"work_package_id": wp.get("id"), "feasibility": wp.get("feasibility_score")},
                 )
                 req = ClearanceRequest(flight=flight, dag=body.get("dag"), force=bool(body.get("force", False)))
             else:
