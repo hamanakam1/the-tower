@@ -109,6 +109,15 @@ class RadarSweep:
         temp = reading.celsius if reading.celsius is not None else 45.0
         source = reading.source
         note = reading.note
+        if reading.celsius is None and node.history:
+            # The estimate is derived from an instantaneous CPU reading, so it
+            # is noisy. A machine's temperature does not jump four degrees
+            # between two sweeps, so the estimate is smoothed the way the
+            # hardware behaves - otherwise every reading looks like a spike
+            # and the anomaly radar has nothing left to say.
+            previous = node.telemetry.temperature_c
+            alpha = 0.25 if node.spec.thermal_mass >= 1.0 else 0.4
+            temp = previous + (temp - previous) * alpha
         # power estimate
         power = 15.0 + (cpu / 100.0) * 60.0 + (vm.percent / 100.0) * 10.0
         bw = random.uniform(50, 400)
@@ -153,10 +162,20 @@ class RadarSweep:
         cpu = max(2.0, min(99.0, cpu))
         mem = base_mem + 8.0 * math.sin(t * 0.3 + phase * 1.3) + random.uniform(-3, 3) + pressure * 0.5
         mem = max(5.0, min(98.0, mem))
-        temp = base_temp + 12.0 * math.sin(t * 0.5 + phase) + (cpu / 100.0) * 15.0 + random.uniform(-2, 2)
-        # occasional anomaly spike
-        if random.random() < 0.03:
-            temp += random.uniform(8, 18)
+        # Temperature moves with thermal inertia: the machine drifts toward the
+        # temperature its load implies instead of jumping to it. A real board
+        # cannot change 18C between two five second samples, and a signal
+        # that does not behave like a machine teaches the anomaly radar to
+        # cry wolf.
+        target_temp = base_temp + (cpu / 100.0) * 15.0
+        if not node.history:
+            # The first sample of a node has no predecessor to drift from.
+            # Starting at the seeded value would show up as a step change.
+            temp = target_temp
+        else:
+            previous = node.telemetry.temperature_c
+            alpha = 0.25 if node.spec.thermal_mass >= 1.0 else 0.4
+            temp = previous + (target_temp - previous) * alpha + random.uniform(-0.4, 0.4)
         temp = max(25.0, min(node.spec.redline_temp_c + 5, temp))
         power = node.spec.max_power_watts * (0.3 + 0.5 * cpu / 100.0) + random.uniform(-5, 5)
         power = max(5.0, power)
