@@ -178,6 +178,10 @@
       <div class="events" id="events"></div>
     </div>
     <div class="panel" style="margin-top:14px;">
+      <h3>Safety Ladder</h3>
+      <div id="ladder" style="font-size:11px;"></div>
+    </div>
+    <div class="panel" style="margin-top:14px;">
       <h3>Containers</h3>
       <div id="containers" style="font-size:11px;"></div>
     </div>
@@ -222,6 +226,10 @@ async function refresh() {
     try {
       const cc = await fetchJSON("/containers");
       renderContainers(cc.containers);
+    } catch(e){}
+    try {
+      const lc = await fetchJSON("/safety/ladder");
+      renderLadder(lc);
     } catch(e){}
   } catch (e) { console.error(e); }
 }
@@ -280,6 +288,21 @@ function renderFlights(flights) {
   }).join("") || `<tr><td colspan="5" style="color:var(--muted);text-align:center;">No flights</td></tr>`;
 }
 
+function renderLadder(l) {
+  const el = document.getElementById("ladder");
+  if (!l || !l.nodes) { el.innerHTML = '<span style="color:var(--muted)">unavailable</span>'; return; }
+  const colors = {admit:"var(--green)", warn:"var(--cyan)", throttle:"var(--amber)", drain:"var(--amber)", kill:"var(--red)"};
+  const order = ["kill","drain","throttle","warn","admit"];
+  const rows = Object.entries(l.nodes).map(([nid, a]) => `
+    <div style="padding:4px 0;border-bottom:1px solid var(--border);">
+      <b style="color:${colors[a.ladder]||"var(--fg)"}">${a.ladder.toUpperCase()}</b>
+      <span style="color:var(--muted)">${nid}</span><br/>
+      <span style="color:var(--muted)">${a.reason}</span>
+    </div>`).join("");
+  const counts = order.filter(k => l.counts[k]).map(k =>
+    `<span style="color:${colors[k]}">${l.counts[k]} ${k}</span>`).join(" · ");
+  el.innerHTML = rows + `<div style="margin-top:6px;color:var(--muted)">${counts}</div>`;
+}
 function renderContainers(cs) {
   const el = document.getElementById("containers");
   if (!cs || !cs.length) { el.innerHTML = '<span style="color:var(--muted)">No containers</span>'; return; }

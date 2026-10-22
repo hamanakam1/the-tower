@@ -22,6 +22,7 @@ from .radar import RadarSweep
 from .anomaly import AnomalyRadar
 from .storage import Storage
 from .policy import MeshSnapshot, NodeView, ScopeView, Decision, decide, POLICY_VERSION
+from .safety import Ladder, assess, throttled_weight, THROTTLE_FACTOR, ladder_summary
 import logging
 
 logger = logging.getLogger("the_tower")
@@ -81,6 +82,8 @@ class Tower:
         self._idempotency: Dict[str, Dict[str, Any]] = {}
         # the most recent admission decision (explainability / debugging)
         self._last_decision: Optional[Decision] = None
+        # node id -> latest safety-ladder assessment
+        self._node_ladder: Dict[str, Any] = {}
         # persist node specs
         if self.storage is not None:
             for spec in specs:
@@ -389,6 +392,46 @@ class Tower:
             flight.assigned_node = decision.assigned_node
             flight.takeoff_at = datetime.now(timezone.utc)
             flight.status = FlightStatus.IN_FLIGHT
+
+            # The safety ladder decides how much of the request the node
+            # actually gets. A throttled flight still flies, but at a
+            # reduced CPU share; a drained node takes no new work.
+            ladder = Ladder.ADMIT
+            if best_node is not None:
+                view = next((n for n in self.snapshot().nodes if n.id == best_node.spec.id), None)
+                if view is not None:
+                    predicted = self.anomaly.trend_summary(best_node).get("secs_to_redline")
+                    assessment = assess(view, flight, predicted)
+                    ladder = assessment.ladder
+                    self._node_ladder[best_node.spec.id] = assessment
+                    if assessment.ladder in (Ladder.WARN, Ladder.THROTTLE, Ladder.DRAIN):
+                        self._emit(EventKind.ANOMALY, node_id=best_node.spec.id,
+                                   flight_id=flight.id,
+                                   message=f"{assessment.ladder.value.upper()}: {assessment.reason}",
+                                   severity=assessment.severity,
+                                   data=assessment.to_dict())
+                    if assessment.ladder == Ladder.DRAIN:
+                        # node is heading for redline: do not admit this flight
+                        flight.status = FlightStatus.QUEUED
+                        self._queued_ids.add(flight.id)
+                        flight.takeoff_at = None
+                        flight.cleared_at = None
+                        flight.reason = f"node draining: {assessment.reason}"
+                        if self.storage is not None:
+                            await self._store(self.storage.upsert_flight, flight)
+                        return ClearanceResponse(decision=ClearanceDecision.QUEUED,
+                                                flight_id=flight.id,
+                                                assigned_node=decision.assigned_node,
+                                                reason=flight.reason,
+                                                estimated_wait_s=60.0,
+                                                admission=decision.to_dict())
+                    if assessment.ladder == Ladder.THROTTLE:
+                        factor = THROTTLE_FACTOR.get(Ladder.THROTTLE, 0.5)
+                        throttled = throttled_weight(flight, factor)
+                        flight.weight = throttled.weight
+                        flight.metadata = {**flight.metadata, "throttled": True,
+                                           "throttle_factor": factor}
+
             if best_node is not None:
                 best_node.active_flights.append(flight.id)
                 best_node.active_weights[flight.id] = flight.weight
@@ -404,6 +447,7 @@ class Tower:
                 "decision": decision.decision.value,
                 "assigned_node": decision.assigned_node,
                 "reason": decision.reason,
+                "ladder": ladder.value,
                 "admission": decision.to_dict(),
             })
             self._emit(EventKind.CLEARANCE_GRANTED, node_id=decision.assigned_node, flight_id=flight.id,
@@ -679,6 +723,22 @@ class Tower:
         if not node:
             return {}
         return self.anomaly.trend_summary(node)
+
+    def ladder(self) -> Dict[str, Any]:
+        """Current enforcement-ladder state for every node."""
+        out = {}
+        counts: Dict[str, int] = {}
+        for node in self.nodes.values():
+            assessment = self._node_ladder.get(node.spec.id)
+            if assessment is None:
+                view = next((n for n in self.snapshot().nodes if n.id == node.spec.id), None)
+                predicted = self.anomaly.trend_summary(node).get("secs_to_redline")
+                assessment = assess(view, None, predicted) if view else None
+            if assessment is None:
+                continue
+            out[node.spec.id] = assessment.to_dict()
+            counts[assessment.ladder.value] = counts.get(assessment.ladder.value, 0) + 1
+        return {"nodes": out, "counts": counts}
 
     # ---------------- persistence helpers ----------------
     async def _store(self, fn, *args, **kwargs):

@@ -187,6 +187,9 @@ class TowerServer:
                 return JSONResponse({"decision": None})
             return JSONResponse(d.to_dict())
 
+        async def safety_ladder(request):
+            return JSONResponse(tower.ladder())
+
         async def kill(request):
             body = {}
             try:
@@ -311,6 +314,7 @@ class TowerServer:
             Route("/clearance", clearance, methods=["POST"]),
             Route("/clearance/v2", clearance_v2, methods=["POST"]),
             Route("/decision/last", last_decision),
+            Route("/safety/ladder", safety_ladder),
             Route("/kill/{container_id}", kill, methods=["POST"]),
             Route("/airspace", airspace),
             Route("/events", events),
