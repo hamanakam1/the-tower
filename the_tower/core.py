@@ -16,7 +16,7 @@ from .schemas import (
     Flight, FlightStatus, ClearanceRequest, ClearanceResponse,
     ClearanceDecision, FlightPriority, ResourceWeight,
     KillRequest, KillResponse, TowerEvent, EventKind,
-    AirspaceSnapshot, default_nodes,
+    AirspaceSnapshot, default_nodes, Lease, LeaseStatus, LeaseRequest,
 )
 from .radar import RadarSweep
 from .anomaly import AnomalyRadar
@@ -87,6 +87,8 @@ class Tower:
         self._node_ladder: Dict[str, Any] = {}
         # last telemetry rollup (epoch seconds)
         self._last_rollup: float = 0.0
+        # lease id -> Lease (the Tower's claims on node resources)
+        self.leases: Dict[str, Lease] = {}
         # persist node specs
         if self.storage is not None:
             for spec in specs:
@@ -185,6 +187,10 @@ class Tower:
                 logger.warning("stale kill error: %s", e)
         # telemetry retention: roll old samples up so history stays small
         await self._maybe_rollup()
+        # release the resources of any lease whose worker went away
+        reaped = self.reap_expired_leases()
+        if reaped:
+            await self._dispatch_queued()
         # update flight statuses: in-flight flights may land randomly-ish based on duration
         await self._progress_flights()
         await self._dispatch_queued()
@@ -255,6 +261,7 @@ class Tower:
                     if node:
                         node.active_weights.pop(fid, None)
                     self._deindex_scope(flight)
+                    self._release_lease_for(fid)
                     if self.storage is not None:
                         await self._store(self.storage.upsert_flight, flight)
                     self._emit(EventKind.LANDING, node_id=flight.assigned_node, flight_id=fid,
@@ -539,6 +546,13 @@ class Tower:
             node.active_weights[flight.id] = flight.weight
             if flight.id in node.queued_flights:
                 node.queued_flights = [f for f in node.queued_flights if f != flight.id]
+        # the flight holds a time-bounded claim on the node's resources
+        lease = self.issue_lease(flight, decision.assigned_node)
+        if lease is not None:
+            self._emit(EventKind.TAKEOFF, node_id=decision.assigned_node,
+                       flight_id=flight.id,
+                       message=f"Lease {lease.id} issued for {flight.callsign}",
+                       severity="info", data={"lease_id": lease.id})
         self._index_scope(flight)
         if self.storage is not None:
             await self._store(self.storage.upsert_flight, flight)
@@ -622,6 +636,7 @@ class Tower:
                     node.active_weights.pop(flight_id, None)
                 if flight:
                     self._deindex_scope(flight)
+                    self._release_lease_for(flight.id)
                 if flight and self.storage is not None:
                     await self._store(self.storage.upsert_flight, flight)
             # actual process kill (best effort) for local containers
@@ -696,6 +711,91 @@ class Tower:
         self._emit(EventKind.NODE_ONLINE, node_id=spec.id,
                    message=f"Node registered: {spec.name}", severity="info")
         return node
+
+    # ---------------- leases ----------------
+    def issue_lease(self, flight: Flight, node_id: str, ttl_s: float = 300.0) -> Optional[Lease]:
+        """Claim a node's resources for a flight, for a bounded time.
+
+        The lease is the Tower's claim. If the worker never comes back, the
+        lease expires and the resources are released by the sweep — nothing
+        is stranded.
+        """
+        if not flight.assigned_node or flight.assigned_node != node_id:
+            return None
+        lease = Lease(
+            flight_id=flight.id,
+            node_id=node_id,
+            cpu_cores=flight.weight.cpu_cores,
+            memory_gb=flight.weight.memory_gb,
+            gpu_units=flight.weight.gpu_units,
+            ttl_s=ttl_s,
+        )
+        self.leases[lease.id] = lease
+        flight.metadata = {**flight.metadata, "lease_id": lease.id}
+        return lease
+
+    def renew_lease(self, lease_id: str, ttl_s: Optional[float] = None) -> Optional[Lease]:
+        lease = self.leases.get(lease_id)
+        if lease is None or lease.status == LeaseStatus.RELEASED:
+            return None
+        lease.renew(ttl_s)
+        return lease
+
+    def release_lease(self, lease_id: str, status: LeaseStatus = LeaseStatus.RELEASED) -> bool:
+        lease = self.leases.get(lease_id)
+        if lease is None:
+            return False
+        lease.status = status
+        return True
+
+    def _release_lease_for(self, flight_id: str):
+        for lease in self.leases.values():
+            if lease.flight_id == flight_id and lease.status == LeaseStatus.ACTIVE:
+                lease.status = LeaseStatus.RELEASED
+                return lease
+        return None
+
+    def expired_leases(self) -> List[Lease]:
+        now = datetime.now(timezone.utc)
+        return [l for l in self.leases.values()
+                if l.status == LeaseStatus.ACTIVE and l.is_expired(now)]
+
+    def reap_expired_leases(self) -> List[Lease]:
+        """Release the resources of expired leases and reschedule their flights.
+
+        This is what stops a dead agent from holding a node hostage.
+        """
+        reaped = []
+        for lease in self.expired_leases():
+            lease.status = LeaseStatus.EXPIRED
+            node = self.nodes.get(lease.node_id)
+            if node is not None:
+                node.active_flights = [f for f in node.active_flights if f != lease.flight_id]
+                node.active_weights.pop(lease.flight_id, None)
+            flight = self.flights.get(lease.flight_id)
+            if flight is not None and flight.status == FlightStatus.IN_FLIGHT:
+                if flight.retries < flight.max_retries:
+                    flight.retries += 1
+                    flight.status = FlightStatus.QUEUED
+                    self._queued_ids.add(flight.id)
+                    flight.assigned_node = None
+                    flight.takeoff_at = None
+                    flight.cleared_at = None
+                    flight.reason = f"lease expired, rescheduling (retry {flight.retries}/{flight.max_retries})"
+                else:
+                    flight.status = FlightStatus.SHOT_DOWN
+                    flight.shot_down_at = datetime.now(timezone.utc)
+                    flight.reason = "lease expired (max retries)"
+                self._deindex_scope(flight)
+            reaped.append(lease)
+            self._emit(EventKind.ANOMALY, node_id=lease.node_id, flight_id=lease.flight_id,
+                       message=f"Lease {lease.id} expired - resources released",
+                       severity="warn",
+                       data={"lease_id": lease.id, "flight_id": lease.flight_id})
+        if reaped:
+            self.log_audit({"kind": "lease_expired",
+                            "leases": [l.id for l in reaped]})
+        return reaped
 
     # ---------------- node lifecycle ----------------
     def set_node_state(self, node_id: str, state: str) -> bool:

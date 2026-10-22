@@ -5,7 +5,7 @@ Node -> Telemetry -> Flight -> Clearance -> Kill.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
@@ -264,6 +264,69 @@ class ClearanceResponse(BaseModel):
         description="Explainability block: policy version, node state at decision, scores",
     )
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class LeaseStatus(str, Enum):
+    ACTIVE = "active"
+    RENEWING = "renewing"
+    EXPIRED = "expired"
+    RELEASED = "released"
+
+
+class Lease(BaseModel):
+    """A time-bounded claim on a node's resources.
+
+    A lease is what the Tower holds, not what the node believes. If the
+    agent dies, the lease expires and the resources are released without
+    anyone having to notice the death.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(default_factory=lambda: f"lease-{uuid4().hex[:10]}")
+    flight_id: str
+    node_id: str
+    cpu_cores: float = 0.0
+    memory_gb: float = 0.0
+    gpu_units: float = 0.0
+    ttl_s: float = 300.0
+    issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: Optional[datetime] = None
+    renewed_at: Optional[datetime] = None
+    renewals: int = 0
+    status: LeaseStatus = LeaseStatus.ACTIVE
+    owner: str = "tower"
+
+    def model_post_init(self, __context):
+        if self.expires_at is None:
+            self.expires_at = self.issued_at + timedelta(seconds=self.ttl_s)
+
+    def is_expired(self, now: Optional[datetime] = None) -> bool:
+        now = now or datetime.now(timezone.utc)
+        return self.expires_at is not None and self.expires_at <= now
+
+    def remaining_s(self, now: Optional[datetime] = None) -> float:
+        now = now or datetime.now(timezone.utc)
+        if self.expires_at is None:
+            return 0.0
+        return max(0.0, (self.expires_at - now).total_seconds())
+
+    def renew(self, ttl_s: Optional[float] = None) -> "Lease":
+        now = datetime.now(timezone.utc)
+        self.renewed_at = now
+        self.renewals += 1
+        self.status = LeaseStatus.ACTIVE
+        if ttl_s is not None:
+            self.ttl_s = ttl_s
+        self.expires_at = now + timedelta(seconds=self.ttl_s)
+        return self
+
+
+class LeaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    flight_id: str
+    ttl_s: float = Field(default=300.0, ge=5.0, le=86400.0)
+    owner: str = "tower"
 
 
 class KillRequest(BaseModel):

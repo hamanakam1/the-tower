@@ -193,6 +193,29 @@ class TowerServer:
         async def safety_ladder(request):
             return JSONResponse(tower.ladder())
 
+        async def list_leases(request):
+            leases = list(tower.leases.values())
+            return JSONResponse({"leases": [l.model_dump(mode="json") for l in leases]})
+
+        async def renew_lease(request):
+            lease_id = request.path_params["lease_id"]
+            body = {}
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            lease = tower.renew_lease(lease_id, body.get("ttl_s"))
+            if lease is None:
+                return JSONResponse({"error": "lease not found"}, status_code=404)
+            return JSONResponse({"ok": True, "lease": lease.model_dump(mode="json")})
+
+        async def release_lease(request):
+            lease_id = request.path_params["lease_id"]
+            ok = tower.release_lease(lease_id)
+            if not ok:
+                return JSONResponse({"error": "lease not found"}, status_code=404)
+            return JSONResponse({"ok": True})
+
         async def decisions(request):
             limit = int(request.query_params.get("limit", 50))
             if tower.storage is None:
@@ -376,6 +399,9 @@ class TowerServer:
             Route("/clearance/v2", clearance_v2, methods=["POST"]),
             Route("/decision/last", last_decision),
             Route("/safety/ladder", safety_ladder),
+            Route("/leases", list_leases, methods=["GET"]),
+            Route("/leases/{lease_id}/renew", renew_lease, methods=["POST"]),
+            Route("/leases/{lease_id}", release_lease, methods=["DELETE"]),
             Route("/decisions", decisions),
             Route("/replay", replay_decision, methods=["POST"]),
             Route("/kill/{container_id}", kill, methods=["POST"]),
