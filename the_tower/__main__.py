@@ -43,6 +43,17 @@ def build_parser():
     agent.add_argument("--sensor", default="", help="temperature backend: psutil, osx-cpu-temp, estimate")
     agent.add_argument("--lease", default="", help="lease id to renew on every sweep")
     agent.add_argument("--lease-ttl", type=float, default=300.0)
+    agent.add_argument("--register", action="store_true",
+                       help="Register this node with the tower before reporting, "
+                            "describing the machine the agent is running on")
+    agent.add_argument("--redline", type=float, default=85.0,
+                       help="Redline temperature for this node, in Celsius")
+    agent.add_argument("--role", default="Mesh Node", help="What this node is for")
+    agent.add_argument("--location", default="local", help="Where this node physically is")
+    agent.add_argument("--enforcement", choices=("advisory", "enforce"), default="advisory",
+                       help="Whether the tower may act on this node on its own")
+    agent.add_argument("--staleness", type=int, default=30,
+                       help="Seconds without telemetry before the node is unknown")
 
     return p
 
@@ -145,7 +156,8 @@ def main():
         node_id = args.node_id or platform.node()
         from .agent import run
         asyncio.run(run(args.tower, node_id, args.interval, args.token, args.sensor,
-                        args.lease, args.lease_ttl))
+                        args.lease, args.lease_ttl, args.register, args.redline,
+                        args.role, args.location, args.enforcement, args.staleness))
     else:
         print(f"Unknown command: {args.command}", file=sys.stderr)
         sys.exit(1)

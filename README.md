@@ -184,7 +184,26 @@ volume. See the [package on GitHub](https://github.com/hamanakam1/the-tower/pkgs
 - `GET /decisions` - Recorded clearance decisions
 - `POST /replay` - Re-derive a decision from its recorded snapshot
 
+## Adding a real node
+
+One command, run on the machine that joins the mesh:
+
+```bash
+the-tower agent --tower http://tower.local:8765 --node-id pi-01 --register \
+                --redline 80 --role "Drone" --location edge
+```
+
+`--register` describes the machine the agent is running on — real core
+count, real memory, the redline you chose — and registers it with the Tower
+as a node that reports for itself. The Tower stops simulating it and starts
+reading what the machine actually says. A node with no temperature sensor
+says so, and its readings are labelled `estimated` everywhere they appear.
+
+Without `--register` the agent will tell you the node is not registered
+rather than pushing into a 404 forever.
+
 ## Visualization
+
 
 Open the dashboard at `http://127.0.0.1:8765/` for the live radar, node health, flight board, and anti-air battery controls. The panels are captured in [The dashboard](#the-dashboard) above.
 
