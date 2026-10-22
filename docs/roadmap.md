@@ -66,7 +66,7 @@ sits between the two:
 ## 2. Where we are: an honest read of `v0.3.0`
 
 The Tower is a working prototype with a genuinely good skeleton. Roughly
-2,800 lines of Python, 26 passing tests, a live dashboard, SQLite persistence,
+2,800 lines of Python, 31 passing tests, a live dashboard, SQLite persistence,
 WebSocket push, Prometheus metrics, a telemetry agent, and a CI workflow.
 The bones are right: a clear domain model (`schemas.py`), a clear engine
 (`core.py`), a thin HTTP layer (`server.py`), and a persistence boundary
