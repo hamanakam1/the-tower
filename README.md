@@ -128,6 +128,18 @@ the-tower radar            # one-shot telemetry sweep
 the-tower status           # node health
 ```
 
+### Container image
+
+A published image is built and smoke-tested on every release tag.
+
+```bash
+docker pull ghcr.io/hamanakam1/the-tower:0.3.0
+docker run --rm -p 8765:8765 ghcr.io/hamanakam1/the-tower:0.3.0
+```
+
+The image runs as a non-root user and keeps its database on the `/data`
+volume. See the [package on GitHub](https://github.com/hamanakam1/the-tower/pkgs/container/the-tower).
+
 ## API Endpoints
 
 - `POST /clearance` - Request flight clearance for a task
