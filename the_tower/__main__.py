@@ -41,6 +41,8 @@ def build_parser():
     agent.add_argument("--interval", type=float, default=5.0)
     agent.add_argument("--token", default="")
     agent.add_argument("--sensor", default="", help="temperature backend: psutil, osx-cpu-temp, estimate")
+    agent.add_argument("--lease", default="", help="lease id to renew on every sweep")
+    agent.add_argument("--lease-ttl", type=float, default=300.0)
 
     return p
 
@@ -142,7 +144,8 @@ def main():
         import platform
         node_id = args.node_id or platform.node()
         from .agent import run
-        asyncio.run(run(args.tower, node_id, args.interval, args.token, args.sensor))
+        asyncio.run(run(args.tower, node_id, args.interval, args.token, args.sensor,
+                        args.lease, args.lease_ttl))
     else:
         print(f"Unknown command: {args.command}", file=sys.stderr)
         sys.exit(1)

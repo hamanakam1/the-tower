@@ -182,6 +182,10 @@
       <div id="ladder" style="font-size:11px;"></div>
     </div>
     <div class="panel" style="margin-top:14px;">
+      <h3>Leases</h3>
+      <div id="leases" style="font-size:11px;"></div>
+    </div>
+    <div class="panel" style="margin-top:14px;">
       <h3>Containers</h3>
       <div id="containers" style="font-size:11px;"></div>
     </div>
@@ -230,6 +234,10 @@ async function refresh() {
     try {
       const lc = await fetchJSON("/safety/ladder");
       renderLadder(lc);
+    } catch(e){}
+    try {
+      const lz = await fetchJSON("/leases");
+      renderLeases(lz.leases);
     } catch(e){}
   } catch (e) { console.error(e); }
 }
@@ -302,6 +310,20 @@ function renderLadder(l) {
   const counts = order.filter(k => l.counts[k]).map(k =>
     `<span style="color:${colors[k]}">${l.counts[k]} ${k}</span>`).join(" · ");
   el.innerHTML = rows + `<div style="margin-top:6px;color:var(--muted)">${counts}</div>`;
+}
+function renderLeases(ls) {
+  const el = document.getElementById("leases");
+  if (!ls || !ls.length) { el.innerHTML = '<span style="color:var(--muted)">no active leases</span>'; return; }
+  el.innerHTML = ls.map(l => {
+    const exp = new Date(l.expires_at);
+    const left = Math.max(0, Math.round((exp - new Date()) / 1000));
+    const color = left < 30 ? "var(--red)" : left < 120 ? "var(--amber)" : "var(--green)";
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border);">
+      <b style="color:var(--cyan)">${l.flight_id}</b> <span style="color:var(--muted)">${l.node_id}</span><br/>
+      <span style="color:${color}">${l.status} · ${left}s left</span> ·
+      <span style="color:var(--muted)">${l.cpu_cores}c / ${l.memory_gb}GB</span>
+    </div>`;
+  }).join("");
 }
 function renderContainers(cs) {
   const el = document.getElementById("containers");
