@@ -76,6 +76,34 @@ async def test_scope_conflict_queues(tower):
 
 
 @pytest.mark.asyncio
+async def test_preemption(tower):
+    from the_tower.schemas import Flight, ResourceWeight, ClearanceRequest, FlightPriority
+    f1 = Flight(task="low prio", scope=["r"], priority=FlightPriority.P3,
+                weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=100))
+    await tower.request_clearance(ClearanceRequest(flight=f1))
+    assert f1.status.value == "in_flight"
+    f2 = Flight(task="high prio", scope=["r"], priority=FlightPriority.P0,
+                weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
+    resp = await tower.request_clearance(ClearanceRequest(flight=f2))
+    assert resp.decision.value == "cleared"
+    assert tower.flights[f1.id].status.value == "shot_down"
+
+
+@pytest.mark.asyncio
+async def test_container_stale_kill(tower):
+    import asyncio
+    tower.register_container("c-stale", node_id="m3max")
+    # backdate heartbeat
+    tower.containers["c-stale"]["last_heartbeat"] = __import__("datetime").datetime.now(__import__("datetime").timezone.utc) - __import__("datetime").timedelta(seconds=100)
+    # trigger sweep
+    await tower.radar.sweep_once()
+    # sweep calls kill for stale; flight may not exist but container status? kill executed
+    # ensure no crash; container marked? kill doesn't update container status; check event
+    events = [e.message for e in tower.events]
+    assert any("c-stale" in m for m in events)
+
+
+@pytest.mark.asyncio
 async def test_node_registration(tower):
     from the_tower.schemas import NodeSpec
     spec = NodeSpec(id="newnode", name="New Node", role="test", specs="x", constraints="y",
