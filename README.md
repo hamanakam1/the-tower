@@ -38,3 +38,22 @@ Unlike cloud-native applications that assume infinite compute, The Tower operate
 ## Status
 
 Early scaffolding - architecture design phase.
+
+## Hardware Topology
+
+| Node | Role | Specs | Constraints |
+|------|------|-------|-------------|
+| M3 Max | Heavy Bomber | 128GB Unified Memory, Apple Silicon | Thermal throttling under sustained load |
+| Raspberry Pi 5 Cluster | Drone Swarm | Multiple nodes | 80°C redline, limited RAM/power |
+| Mobile HPC Trailer | Off-grid Compute | Solar + battery banks | Constrained by SoC/battery discharge |
+
+## API Endpoints
+
+- `POST /clearance` - Request flight clearance for a task
+- `GET /radar` - Current mesh telemetry snapshot
+- `GET /status/:node` - Per-node health details
+- `POST /kill/:container` - Emergency kill (internal use)
+
+## License
+
+MIT
