@@ -94,7 +94,7 @@ The honest problem is that **most of the mesh is still fiction**.
 | Temperature | On macOS `psutil.sensors_temperatures()` is usually empty, so temperature is an estimate from CPU load (`radar.py:99`). | "Thermal ATC" is really "CPU-load ATC". |
 | Kill authority | `core.py:379-384` will `os.kill(pid, SIGKILL)` any numeric `container_id` with no check that the Tower owns that process. | One stray request can kill an unrelated PID. |
 | Config | `config.example.yaml` documents `token:`; the code only reads `TOWER_TOKEN` from the environment (`server.py:273`). `TOWER_DB_PATH` in the Dockerfile is never read. | Documented configuration silently does nothing. |
-| Versions | `pyproject.toml` says `0.2.0`; `CHANGELOG.md` says `0.3.0`; `/health` says `0.3.0`; the dashboard footer says `v0.2.0`. | Which version is running is unknowable from the outside. |
+| Versions | `pyproject.toml`, `__init__.py` and `/health` now agree on `0.3.0`, but the dashboard footer still hardcodes `v0.2.0` (`static/index.html:192`) and nothing reads `__version__`. | The running version is still not discoverable from one place. |
 | Event stream | `/audit` is only written when a client explicitly posts to it. Clearance and kill decisions are **not** recorded in the audit chain. | The "immutable audit ledger" does not actually audit the decisions that matter. |
 | Async storage | `storage.py` uses a synchronous `sqlite3` connection, called directly from `async` handlers. | The event loop blocks on disk I/O as the mesh grows. |
 | Thread affinity | The SQLite connection was bound to the thread that constructed the Tower, so serving it from another thread (uvicorn workers, an embedding app, the test client) raised `SQLite objects created in a thread can only be used in that same thread`. | Any deployment that does not run the Tower and the app on the same thread would have failed at the first write. |
@@ -110,15 +110,17 @@ The honest problem is that **most of the mesh is still fiction**.
 - `pyproject.toml` — the WebSocket endpoint was advertised in the README and
   wired into the dashboard, but `websockets` was not a declared dependency, so
   on a clean install uvicorn answered the handshake with **404** and live push
-  was silently dead. `websockets` is now a runtime dependency (as are `httpx`
-  and `pyyaml`, both already imported by the code).
+  was silently dead. Fixed in the `v0.3.0` tag commit (`websockets`, `httpx`
+  and `pyyaml` are now runtime dependencies — all three were already imported
+  by the code).
 - `storage.py` — the SQLite connection was created on the constructing thread
   and used from whatever thread served the request, which raised
   `ProgrammingError` on the first write in a multi-threaded deployment. The
   connection is now explicitly shared (`check_same_thread=False`) and every
   storage operation is serialised through one lock.
 
-> These fixes are in this branch, with regression tests in
+> These fixes are in this branch (except the dependency declaration, which
+> landed in the `v0.3.0` tag), with regression tests in
 > [`tests/test_storage.py`](../tests/test_storage.py). The rest are
 > scheduled in Horizon 0.
 
@@ -272,7 +274,7 @@ Nothing new is added; everything that exists is made honest.
 
 | # | Work | Done when |
 |---|---|---|
-| 0.1 | Single-source the version (`pyproject` → `__version__` → `/health`, dashboard footer, `User-Agent`) | One version string, three consumers, no drift |
+| 0.1 | Single-source the version (`__version__` → `/health`, dashboard footer, `User-Agent`, `pyproject` build metadata) | One version string, every consumer reads it, no drift |
 | 0.2 | Config parity: `config.example.yaml` fields actually load, or are removed | Every documented key has a test proving it takes effect |
 | 0.3 | Fix the shorthand clearance path so `scope`, `weight.gpu_units`, `constraints` survive | A scope-conflict test passes through the HTTP API |
 | 0.4 | Replace the simulated-node branch with a pluggable sampler per node | A node registered with a real id reports real telemetry |
