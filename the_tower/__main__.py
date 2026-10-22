@@ -31,10 +31,18 @@ def build_parser():
     demo.add_argument("--port", type=int, default=8765)
     demo.add_argument("--count", type=int, default=5)
 
+    agent = sub.add_parser("agent", help="Run telemetry agent pushing local metrics to a Tower")
+    agent.add_argument("--tower", default="http://127.0.0.1:8765")
+    agent.add_argument("--node-id", default=None)
+    agent.add_argument("--interval", type=float, default=5.0)
+    agent.add_argument("--token", default="")
+
     return p
 
 
 async def cmd_serve(args):
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     import yaml
     db_path = args.db
     interval = args.interval
@@ -118,6 +126,11 @@ def main():
         asyncio.run(cmd_status(args))
     elif args.command == "demo":
         asyncio.run(cmd_demo(args))
+    elif args.command == "agent":
+        import platform
+        node_id = args.node_id or platform.node()
+        from .agent import run
+        asyncio.run(run(args.tower, node_id, args.interval, args.token))
     else:
         print(f"Unknown command: {args.command}", file=sys.stderr)
         sys.exit(1)

@@ -92,3 +92,17 @@ def test_audit_verify(client):
     r = client.get("/audit/verify")
     assert r.status_code == 200
     assert "valid" in r.json()
+
+
+def test_metrics(client):
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    assert "tower_nodes_total" in r.text
+
+
+def test_flight_detail(client):
+    r = client.post("/clearance", json={"task": "x", "weight": {"cpu_cores": 1, "memory_gb": 1, "duration_est_s": 5}})
+    fid = r.json()["flight_id"]
+    r2 = client.get(f"/flights/{fid}")
+    assert r2.status_code == 200
+    assert r2.json()["flight"]["id"] == fid

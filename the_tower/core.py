@@ -21,6 +21,9 @@ from .schemas import (
 from .radar import RadarSweep
 from .anomaly import AnomalyRadar
 from .storage import Storage
+import logging
+
+logger = logging.getLogger("the_tower")
 
 
 class Tower:
@@ -109,6 +112,7 @@ class Tower:
         self.events.append(ev)
         if self.storage is not None:
             self.storage.append_event(ev)
+        logger.debug("event %s %s", ev.kind.value, ev.message)
         for cb in list(self._subscribers):
             try:
                 cb(ev)

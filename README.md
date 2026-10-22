@@ -65,6 +65,9 @@ Unlike cloud-native applications that assume infinite compute, The Tower operate
 - **Persistence** - SQLite-backed flights, events, telemetry, audit hash chain
 - **Live Push** - WebSocket airspace broadcasts
 - **Auth** - Optional bearer token for mutating endpoints
+- **Metrics** - Prometheus `/metrics` endpoint
+- **Telemetry Agent** - `the-tower agent` pushes local node metrics
+- **Container** - Dockerfile for one-command deployment
 
 ## Hardware Topology
 
@@ -101,6 +104,8 @@ the-tower status           # node health
 - `GET /conflicts?scope=` - Scope conflict check
 - `GET /audit/verify` - Verify audit hash chain
 - `WS /ws` - Live airspace push
+- `GET /metrics` - Prometheus metrics
+- `GET /flights/:id` - Flight detail + related events
 
 ## Visualization
 

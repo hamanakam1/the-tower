@@ -1,0 +1,81 @@
+"""Telemetry agent: collects local metrics and pushes to a Tower instance."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import platform
+import time
+
+import httpx
+import psutil
+
+from .schemas import Telemetry, ThermalState
+
+
+def sample(node_id: str) -> dict:
+    cpu = psutil.cpu_percent(interval=1)
+    vm = psutil.virtual_memory()
+    temp = None
+    try:
+        temps = psutil.sensors_temperatures()
+        for key in ("cpu_thermal", "coretemp", "Apple", "cpu-thermal"):
+            if key in temps and temps[key]:
+                temp = temps[key][0].current
+                break
+        if temp is None and temps:
+            first = next(iter(temps.values()))
+            if first:
+                temp = first[0].current
+    except Exception:
+        temp = None
+    if temp is None:
+        temp = 45.0 + (cpu / 100.0) * 30.0
+    power = 15.0 + (cpu / 100.0) * 60.0
+    redline = 95.0
+    ratio = temp / redline
+    state = "nominal"
+    if ratio >= 0.95: state = "critical"
+    elif ratio >= 0.85: state = "serious"
+    elif ratio >= 0.70: state = "fair"
+    t = Telemetry(
+        node_id=node_id,
+        cpu_percent=round(cpu, 1),
+        memory_percent=round(vm.percent, 1),
+        memory_used_gb=round(vm.used / (1024**3), 2),
+        memory_total_gb=round(vm.total / (1024**3), 2),
+        temperature_c=round(temp, 1),
+        power_watts=round(power, 1),
+        bandwidth_mbps=0.0,
+        load_avg=round(float(psutil.getloadavg()[0]) if hasattr(psutil, "getloadavg") else cpu/100*4, 2),
+        thermal_state=state,
+    )
+    return t.model_dump(mode="json")
+
+
+async def run(tower_url: str, node_id: str, interval: float, token: str = ""):
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    async with httpx.AsyncClient() as c:
+        while True:
+            try:
+                payload = sample(node_id)
+                r = await c.post(f"{tower_url}/ingest/{node_id}", json=payload, headers=headers, timeout=10)
+                print(f"[{node_id}] push {r.status_code}")
+            except Exception as e:
+                print(f"[{node_id}] error: {e}")
+            await asyncio.sleep(interval)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="the-tower-agent")
+    p.add_argument("--tower", default="http://127.0.0.1:8765")
+    p.add_argument("--node-id", default=platform.node())
+    p.add_argument("--interval", type=float, default=5.0)
+    p.add_argument("--token", default="")
+    args = p.parse_args()
+    asyncio.run(run(args.tower, args.node_id, args.interval, args.token))
+
+
+if __name__ == "__main__":
+    main()

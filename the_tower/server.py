@@ -179,6 +179,15 @@ class TowerServer:
             aid = tower.log_audit(body)
             return JSONResponse({"audit_id": aid})
 
+        async def flight_detail(request):
+            fid = request.path_params["flight_id"]
+            f = tower.flights.get(fid)
+            if not f:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            related = [e for e in tower.events if e.flight_id == fid]
+            return JSONResponse({"flight": f.model_dump(mode="json"),
+                                 "events": [e.model_dump(mode="json") for e in related]})
+
         async def conflicts(request):
             scope = [s for s in request.query_params.get("scope", "").split(",") if s]
             conflicting = []
@@ -204,6 +213,11 @@ class TowerServer:
         async def list_containers(request):
             return JSONResponse({"containers": [_container_json(c) for c in tower.containers.values()]})
 
+        async def metrics(request):
+            from .metrics import render
+            from starlette.responses import PlainTextResponse
+            return PlainTextResponse(render(tower), media_type="text/plain; version=0.0.4")
+
         routes = [
             Route("/", root),
             Route("/health", health),
@@ -214,6 +228,7 @@ class TowerServer:
             Route("/airspace", airspace),
             Route("/events", events),
             Route("/flights", flights),
+            Route("/flights/{flight_id}", flight_detail),
             Route("/trend/{node_id}", trend),
             Route("/ingest/{node_id}", ingest, methods=["POST"]),
             Route("/nodes", register_node, methods=["POST"]),
@@ -223,6 +238,7 @@ class TowerServer:
             Route("/conflicts", conflicts),
             Route("/containers", register_container, methods=["POST"]),
             Route("/containers", list_containers, methods=["GET"]),
+            Route("/metrics", metrics),
             Route("/containers/{container_id}/heartbeat", heartbeat, methods=["POST"]),
             WebSocketRoute("/ws", ws_handler),
         ]
