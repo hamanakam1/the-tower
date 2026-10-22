@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS telemetry (
     gpu_percent REAL,
     thermal_state TEXT,
     battery_percent REAL,
-    solar_input_watts REAL
+    solar_input_watts REAL,
+    source TEXT,
+    source_note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tel_node_ts ON telemetry(node_id, timestamp);
 CREATE TABLE IF NOT EXISTS nodes (
@@ -127,6 +129,12 @@ MIGRATIONS = [
                metadata_json TEXT,
                last_heartbeat TEXT
            )""",
+    ]),
+    # v4 — telemetry records where the sample came from, so a simulated
+    # reading is never mistaken for a measured one.
+    (4, "telemetry provenance", [
+        "ALTER TABLE telemetry ADD COLUMN source TEXT",
+        "ALTER TABLE telemetry ADD COLUMN source_note TEXT",
     ]),
 ]
 
@@ -314,11 +322,16 @@ class Storage:
     @_serialised
     def append_telemetry(self, t: Telemetry):
         self.conn.execute(
-            """INSERT INTO telemetry VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO telemetry
+               (node_id, timestamp, cpu_percent, memory_percent, memory_used_gb,
+                memory_total_gb, temperature_c, power_watts, bandwidth_mbps, load_avg,
+                gpu_percent, thermal_state, battery_percent, solar_input_watts,
+                source, source_note)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (t.node_id, t.timestamp.isoformat(), t.cpu_percent, t.memory_percent,
              t.memory_used_gb, t.memory_total_gb, t.temperature_c, t.power_watts,
              t.bandwidth_mbps, t.load_avg, t.gpu_percent, t.thermal_state.value,
-             t.battery_percent, t.solar_input_watts),
+             t.battery_percent, t.solar_input_watts, t.source, t.source_note),
         )
         self.conn.commit()
 
@@ -338,6 +351,8 @@ class Storage:
                 bandwidth_mbps=r["bandwidth_mbps"], load_avg=r["load_avg"],
                 gpu_percent=r["gpu_percent"], thermal_state=r["thermal_state"],
                 battery_percent=r["battery_percent"], solar_input_watts=r["solar_input_watts"],
+                source=r["source"] or "simulated" if "source" in r.keys() else "simulated",
+                source_note=r["source_note"] if "source_note" in r.keys() else None,
             ))
         out.reverse()
         return out

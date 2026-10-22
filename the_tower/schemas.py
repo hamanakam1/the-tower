@@ -106,6 +106,10 @@ class Telemetry(BaseModel):
     thermal_state: ThermalState = ThermalState.NOMINAL
     battery_percent: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     solar_input_watts: Optional[float] = Field(default=None, ge=0.0)
+    source: str = Field(default="simulated",
+                        description="Where the sample came from: 'measured', 'simulated', or 'ingested'")
+    source_note: Optional[str] = Field(default=None,
+                                       description="Caveat about the sample, e.g. 'temp estimated from cpu load'")
 
     @field_validator("thermal_state", mode="before")
     @classmethod

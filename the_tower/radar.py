@@ -81,7 +81,9 @@ class RadarSweep:
         return NodeStatus.ONLINE
 
     def _sample(self, nid: str, node: Node, now: float) -> Telemetry:
-        if nid == "m3max":
+        # The local host is sampled with real metrics; every other node is
+        # either agent-driven (ingested) or simulated.
+        if node.spec.location == "local" or nid == "m3max":
             return self._sample_local(node, now)
         return self._sample_simulated(nid, node, now)
 
@@ -102,9 +104,14 @@ class RadarSweep:
                     temp = first[0].current
         except Exception:
             temp = None
+        source = "measured"
+        note = None
         if temp is None:
-            # fallback estimate from load
+            # macOS exposes no CPU thermal sensor through psutil. Estimate
+            # from load and say so — an honest estimate beats a silent fiction.
             temp = 45.0 + (cpu / 100.0) * 30.0 + random.uniform(-2, 2)
+            source = "measured (thermal estimated)"
+            note = "temperature estimated from cpu load; no thermal sensor available"
         # power estimate
         power = 15.0 + (cpu / 100.0) * 60.0 + (vm.percent / 100.0) * 10.0
         bw = random.uniform(50, 400)
@@ -130,15 +137,19 @@ class RadarSweep:
             load_avg=round(float(load), 2),
             gpu_percent=round(gpu, 1) if gpu is not None else None,
             thermal_state=ts,
+            source=source,
+            source_note=note,
         )
 
     def _sample_simulated(self, nid: str, node: Node, now: float) -> Telemetry:
         phase = self._phase[nid]
         t = (now - self._t0) / 60.0  # minutes
-        # base load varies by node
-        base_cpu = {"pi-cluster": 35.0, "trailer-hpc": 50.0}.get(nid, 40.0)
-        base_mem = {"pi-cluster": 55.0, "trailer-hpc": 40.0}.get(nid, 50.0)
-        base_temp = {"pi-cluster": 58.0, "trailer-hpc": 52.0}.get(nid, 50.0)
+        # base load varies by node, derived from the spec rather than a
+        # hardcoded node id, so any node gets a plausible baseline.
+        spec = node.spec
+        base_cpu = 30.0 + min(25.0, spec.cpu_cores * 1.5)
+        base_mem = 40.0 + min(20.0, (spec.memory_gb / 128.0) * 20.0)
+        base_temp = spec.redline_temp_c * 0.62
         # load drift + active flights pressure
         pressure = min(40.0, len(node.active_flights) * 6.0)
         cpu = base_cpu + 15.0 * math.sin(t * 0.7 + phase) + random.uniform(-4, 4) + pressure
@@ -160,7 +171,7 @@ class RadarSweep:
             gpu = min(100.0, max(0.0, 20.0 + 40.0 * math.sin(t * 0.4 + phase) + random.uniform(-5, 5) + pressure))
         battery = None
         solar = None
-        if nid == "trailer-hpc":
+        if node.spec.location == "off-grid":
             battery = max(20.0, min(100.0, 70.0 + 15.0 * math.sin(t * 0.2 + phase) + random.uniform(-3, 3)))
             solar = max(0.0, 200.0 + 100.0 * math.sin(t * 0.1 + phase) + random.uniform(-20, 20))
         redline = node.spec.redline_temp_c
@@ -180,6 +191,8 @@ class RadarSweep:
             thermal_state=ts,
             battery_percent=round(battery, 1) if battery is not None else None,
             solar_input_watts=round(solar, 1) if solar is not None else None,
+            source="simulated",
+            source_note="no node agent attached; values are synthetic",
         )
 
     async def start(self):

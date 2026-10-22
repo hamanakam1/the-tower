@@ -610,6 +610,9 @@ class Tower:
         node = self.nodes.get(node_id)
         if not node:
             return False
+        telem.source = "ingested"
+        if telem.source_note is None:
+            telem.source_note = f"reported by node agent for {node_id}"
         node.telemetry = telem
         node.last_seen = datetime.now(timezone.utc)
         node.history.append(telem)

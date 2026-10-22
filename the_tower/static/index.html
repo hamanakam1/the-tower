@@ -257,6 +257,7 @@ function renderNodes(nodes) {
       <div class="bar temp"><span style="width:${tempPct}%"></span></div>
       <div class="row"><span>PWR</span><b>${t.power_watts}W / ${n.spec.max_power_watts}W</b></div>
       <div class="row"><span>LOAD</span><b>${t.load_avg} · ${n.active_flights.length} flights</b></div>
+      <div class="row"><span>SOURCE</span><b style="color:${t.source==="simulated"?"var(--amber)":"var(--green)"}">${t.source||"unknown"}</b></div>
       ${t.battery_percent!=null ? `<div class="row"><span>BAT</span><b>${t.battery_percent}%</b></div><div class="bar bat"><span style="width:${t.battery_percent}%"></span></div>` : ""}
       ${t.solar_input_watts!=null ? `<div class="row"><span>SOLAR</span><b>${t.solar_input_watts}W</b></div>` : ""}
     </div>`;
