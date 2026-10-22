@@ -339,9 +339,13 @@ class Tower:
                             queued_count=len(self._queued_ids))
 
     async def request_clearance(self, req: ClearanceRequest) -> ClearanceResponse:
+        """Clear a flight for takeoff, or explain why it cannot fly.
+
+        The decision is pure (`policy.decide`); everything below it is the
+        effect: state changes, events, persistence, audit.
+        """
         async with self._lock:
             flight = req.flight
-            # ensure stored
             self.flights[flight.id] = flight
             self._emit(EventKind.CLEARANCE_REQUEST, flight_id=flight.id,
                        message=f"Clearance requested: {flight.callsign} ({flight.task[:60]})",
@@ -353,136 +357,26 @@ class Tower:
             self._last_decision = decision
 
             # --- IMPURE: act on the decision ---
-
-            # rogue flight: shot down on approach
             if decision.decision == ClearanceDecision.SHOT_DOWN:
-                flight.status = FlightStatus.SHOT_DOWN
-                self._queued_ids.discard(flight.id)
-                flight.shot_down_at = datetime.now(timezone.utc)
-                flight.reason = decision.reason
-                if self.storage is not None:
-                    await self._store(self.storage.upsert_flight, flight)
-                self._emit(EventKind.SHOT_DOWN, flight_id=flight.id,
-                           message=f"SHOT DOWN on approach: {flight.callsign} (rogue)",
-                           severity="critical")
-                return ClearanceResponse(decision=decision.decision, flight_id=flight.id,
-                                        reason=decision.reason)
+                return await self._act_shot_down(flight, decision, "rogue flight declared")
 
-            # scope conflict: preempt the incumbent if we outrank it.
-            # Preemption is an enforcement action: in advisory mode the
-            # Tower recommends and records, it does not revoke clearance.
             if decision.preempt_flight_id:
-                existing = self.flights.get(decision.preempt_flight_id)
-                target_node = self.nodes.get(existing.assigned_node) if existing else None
-                enforcing = (target_node.spec.enforcement == "enforce") if target_node else True
-                if enforcing:
-                    await self._preempt(decision.preempt_flight_id,
-                                        f"preempted by {flight.callsign} (higher priority)")
-                else:
-                    self._emit(EventKind.ANOMALY, node_id=decision.preempt_flight_id,
-                               flight_id=flight.id,
-                               message=(f"ADVISORY: would preempt {existing.callsign if existing else decision.preempt_flight_id} "
-                                        f"for {flight.callsign} - node is advisory-only"),
-                               severity="warn",
-                               data={"recommendation": "preempt", "target": decision.preempt_flight_id})
+                await self._act_preempt(flight, decision)
 
-            # queued: no capacity, or a scope conflict we do not outrank
             if decision.decision == ClearanceDecision.QUEUED:
-                flight.status = FlightStatus.QUEUED
-                self._queued_ids.add(flight.id)
-                flight.assigned_node = decision.assigned_node
-                if decision.assigned_node and decision.assigned_node in self.nodes:
-                    node = self.nodes[decision.assigned_node]
-                    if flight.id not in node.queued_flights:
-                        node.queued_flights.append(flight.id)
-                if self.storage is not None:
-                    await self._store(self.storage.upsert_flight, flight)
-                self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
-                           message=f"Denied/queued: {flight.callsign} - {decision.reason}",
-                           severity="warn")
-                return ClearanceResponse(decision=decision.decision, flight_id=flight.id,
-                                        assigned_node=decision.assigned_node,
-                                        reason=decision.reason,
-                                        estimated_wait_s=decision.estimated_wait_s,
-                                        admission=decision.to_dict())
+                return await self._act_queued(flight, decision)
 
-            # cleared: check the anomaly radar before letting it fly
             best_node = self.nodes.get(decision.assigned_node) if decision.assigned_node else None
             if best_node is not None and self.anomaly.is_rogue_flight(best_node):
-                flight.status = FlightStatus.SHOT_DOWN
-                self._queued_ids.discard(flight.id)
-                flight.shot_down_at = datetime.now(timezone.utc)
-                flight.reason = "anomaly radar: node in runaway state - flight shot down"
-                if self.storage is not None:
-                    await self._store(self.storage.upsert_flight, flight)
-                self._emit(EventKind.SHOT_DOWN, node_id=best_node.spec.id, flight_id=flight.id,
-                           message=f"SHOT DOWN: {flight.callsign} - target node runaway",
-                           severity="critical")
-                return ClearanceResponse(decision=ClearanceDecision.SHOT_DOWN, flight_id=flight.id,
-                                        assigned_node=best_node.spec.id, reason=flight.reason,
-                                        admission=decision.to_dict())
+                return await self._act_shot_down(
+                    flight, decision, "anomaly radar: node in runaway state",
+                    node_id=best_node.spec.id)
 
-            # clear for takeoff
-            flight.status = FlightStatus.CLEARED
-            self._queued_ids.discard(flight.id)
-            flight.cleared_at = datetime.now(timezone.utc)
-            flight.assigned_node = decision.assigned_node
-            flight.takeoff_at = datetime.now(timezone.utc)
-            flight.status = FlightStatus.IN_FLIGHT
+            ladder_response, ladder_rung = await self._act_safety_ladder(flight, decision, best_node)
+            if ladder_response is not None:
+                return ladder_response  # a drain returned a response of its own
 
-            # The safety ladder decides how much of the request the node
-            # actually gets. A throttled flight still flies, but at a
-            # reduced CPU share; a drained node takes no new work.
-            ladder = Ladder.ADMIT
-            if best_node is not None:
-                view = next((n for n in self.snapshot().nodes if n.id == best_node.spec.id), None)
-                if view is not None:
-                    predicted = self.anomaly.trend_summary(best_node).get("secs_to_redline")
-                    assessment = assess(view, flight, predicted)
-                    ladder = assessment.ladder
-                    self._node_ladder[best_node.spec.id] = assessment
-                    if assessment.ladder in (Ladder.WARN, Ladder.THROTTLE, Ladder.DRAIN):
-                        self._emit(EventKind.ANOMALY, node_id=best_node.spec.id,
-                                   flight_id=flight.id,
-                                   message=f"{assessment.ladder.value.upper()}: {assessment.reason}",
-                                   severity=assessment.severity,
-                                   data=assessment.to_dict())
-                    if assessment.ladder == Ladder.DRAIN:
-                        if best_node.spec.enforcement == "enforce":
-                            # node is heading for redline: do not admit this flight
-                            flight.status = FlightStatus.QUEUED
-                            self._queued_ids.add(flight.id)
-                            flight.takeoff_at = None
-                            flight.cleared_at = None
-                            flight.reason = f"node draining: {assessment.reason}"
-                            if self.storage is not None:
-                                await self._store(self.storage.upsert_flight, flight)
-                            return ClearanceResponse(decision=ClearanceDecision.QUEUED,
-                                                    flight_id=flight.id,
-                                                    assigned_node=decision.assigned_node,
-                                                    reason=flight.reason,
-                                                    estimated_wait_s=60.0,
-                                                    admission=decision.to_dict())
-                        # advisory mode: recommend draining, but do not block the mesh
-                        self._emit(EventKind.ANOMALY, node_id=best_node.spec.id,
-                                   flight_id=flight.id,
-                                   message=f"ADVISORY: recommend draining {best_node.spec.name} - {assessment.reason}",
-                                   severity="warn", data=assessment.to_dict())
-                    if assessment.ladder == Ladder.THROTTLE:
-                        factor = THROTTLE_FACTOR.get(Ladder.THROTTLE, 0.5)
-                        throttled = throttled_weight(flight, factor)
-                        flight.weight = throttled.weight
-                        flight.metadata = {**flight.metadata, "throttled": True,
-                                           "throttle_factor": factor}
-
-            if best_node is not None:
-                best_node.active_flights.append(flight.id)
-                best_node.active_weights[flight.id] = flight.weight
-                if flight.id in best_node.queued_flights:
-                    best_node.queued_flights = [f for f in best_node.queued_flights if f != flight.id]
-            self._index_scope(flight)
-            if self.storage is not None:
-                await self._store(self.storage.upsert_flight, flight)
+            await self._act_takeoff(flight, decision, best_node)
             await self.log_audit_async({
                 "kind": "clearance",
                 "flight_id": flight.id,
@@ -490,22 +384,164 @@ class Tower:
                 "decision": decision.decision.value,
                 "assigned_node": decision.assigned_node,
                 "reason": decision.reason,
-                "ladder": ladder.value,
+                "ladder": ladder_rung.value,
                 "admission": decision.to_dict(),
                 # the mesh state this decision was made against, so the
                 # decision can be replayed later
                 "snapshot": snapshot_to_dict(snap),
             })
-            self._emit(EventKind.CLEARANCE_GRANTED, node_id=decision.assigned_node, flight_id=flight.id,
-                       message=f"CLEARED FOR TAKEOFF: {flight.callsign} -> {best_node.spec.name if best_node else decision.assigned_node}",
+            node_name = best_node.spec.name if best_node else decision.assigned_node
+            self._emit(EventKind.CLEARANCE_GRANTED, node_id=decision.assigned_node,
+                       flight_id=flight.id,
+                       message=f"CLEARED FOR TAKEOFF: {flight.callsign} -> {node_name}",
                        severity="info")
             self._emit(EventKind.TAKEOFF, node_id=decision.assigned_node, flight_id=flight.id,
-                       message=f"{flight.callsign} airborne on {best_node.spec.name if best_node else decision.assigned_node}",
+                       message=f"{flight.callsign} airborne on {node_name}",
                        severity="info")
             return ClearanceResponse(decision=ClearanceDecision.CLEARED, flight_id=flight.id,
                                     assigned_node=decision.assigned_node,
                                     reason=decision.reason,
                                     admission=decision.to_dict())
+
+    # ---- the effects of a decision ----
+
+    async def _act_shot_down(self, flight: Flight, decision: Decision, why: str,
+                             node_id: Optional[str] = None) -> ClearanceResponse:
+        """Kill a flight before it flies (or while it does)."""
+        flight.status = FlightStatus.SHOT_DOWN
+        self._queued_ids.discard(flight.id)
+        flight.shot_down_at = datetime.now(timezone.utc)
+        flight.reason = why if why != "rogue flight declared" else decision.reason
+        if self.storage is not None:
+            await self._store(self.storage.upsert_flight, flight)
+        self._emit(EventKind.SHOT_DOWN, node_id=node_id, flight_id=flight.id,
+                   message=f"SHOT DOWN: {flight.callsign} - {flight.reason}",
+                   severity="critical")
+        await self.log_audit_async({
+            "kind": "shot_down", "flight_id": flight.id, "callsign": flight.callsign,
+            "node_id": node_id, "reason": flight.reason,
+        })
+        return ClearanceResponse(decision=ClearanceDecision.SHOT_DOWN, flight_id=flight.id,
+                                assigned_node=node_id or decision.assigned_node,
+                                reason=flight.reason, admission=decision.to_dict())
+
+    async def _act_preempt(self, flight: Flight, decision: Decision):
+        """Preempt the incumbent, or recommend it if the node is advisory."""
+        existing = self.flights.get(decision.preempt_flight_id)
+        target_node = self.nodes.get(existing.assigned_node) if existing else None
+        enforcing = (target_node.spec.enforcement == "enforce") if target_node else True
+        if enforcing:
+            await self._preempt(decision.preempt_flight_id,
+                                f"preempted by {flight.callsign} (higher priority)")
+            return
+        # advisory mode: the Tower recommends, and records, but does not act
+        self._emit(EventKind.ANOMALY, node_id=decision.preempt_flight_id, flight_id=flight.id,
+                   message=(f"ADVISORY: would preempt {existing.callsign if existing else decision.preempt_flight_id} "
+                            f"for {flight.callsign} - node is advisory-only"),
+                   severity="warn",
+                   data={"recommendation": "preempt", "target": decision.preempt_flight_id})
+        await self.log_audit_async({
+            "kind": "preempt_recommendation", "flight_id": flight.id,
+            "target": decision.preempt_flight_id, "enforcement": "advisory",
+        })
+
+    async def _act_queued(self, flight: Flight, decision: Decision) -> ClearanceResponse:
+        """Put a flight on the waiting list."""
+        flight.status = FlightStatus.QUEUED
+        self._queued_ids.add(flight.id)
+        flight.assigned_node = decision.assigned_node
+        if decision.assigned_node and decision.assigned_node in self.nodes:
+            node = self.nodes[decision.assigned_node]
+            if flight.id not in node.queued_flights:
+                node.queued_flights.append(flight.id)
+        if self.storage is not None:
+            await self._store(self.storage.upsert_flight, flight)
+        self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
+                   message=f"Denied/queued: {flight.callsign} - {decision.reason}",
+                   severity="warn")
+        await self.log_audit_async({
+            "kind": "clearance", "flight_id": flight.id, "callsign": flight.callsign,
+            "decision": decision.decision.value, "reason": decision.reason,
+            "admission": decision.to_dict(),
+        })
+        return ClearanceResponse(decision=decision.decision, flight_id=flight.id,
+                                assigned_node=decision.assigned_node,
+                                reason=decision.reason,
+                                estimated_wait_s=decision.estimated_wait_s,
+                                admission=decision.to_dict())
+
+    async def _act_safety_ladder(self, flight: Flight, decision: Decision,
+                                 node: Optional[Node]):
+        """Apply the enforcement ladder.
+
+        Returns `(response, rung)`. A non-None response means the flight
+        must not fly; the rung says how far up the ladder the node is.
+        """
+        if node is None:
+            return None, Ladder.ADMIT
+        view = next((n for n in self.snapshot().nodes if n.id == node.spec.id), None)
+        if view is None:
+            return None, Ladder.ADMIT
+        predicted = self.anomaly.trend_summary(node).get("secs_to_redline")
+        assessment = assess(view, flight, predicted)
+        self._node_ladder[node.spec.id] = assessment
+
+        if assessment.ladder in (Ladder.WARN, Ladder.THROTTLE, Ladder.DRAIN):
+            self._emit(EventKind.ANOMALY, node_id=node.spec.id, flight_id=flight.id,
+                       message=f"{assessment.ladder.value.upper()}: {assessment.reason}",
+                       severity=assessment.severity, data=assessment.to_dict())
+        await self.log_audit_async({
+            "kind": "ladder", "flight_id": flight.id, "node_id": node.spec.id,
+            "ladder": assessment.ladder.value, "reason": assessment.reason,
+        })
+
+        if assessment.ladder == Ladder.DRAIN:
+            if node.spec.enforcement == "enforce":
+                # the node is heading for redline: it takes no new work
+                flight.status = FlightStatus.QUEUED
+                self._queued_ids.add(flight.id)
+                flight.takeoff_at = None
+                flight.cleared_at = None
+                flight.reason = f"node draining: {assessment.reason}"
+                if self.storage is not None:
+                    await self._store(self.storage.upsert_flight, flight)
+                return (ClearanceResponse(decision=ClearanceDecision.QUEUED,
+                                          flight_id=flight.id,
+                                          assigned_node=decision.assigned_node,
+                                          reason=flight.reason,
+                                          estimated_wait_s=60.0,
+                                          admission=decision.to_dict()),
+                        assessment.ladder)
+            # advisory mode: recommend draining, but do not block the mesh
+            self._emit(EventKind.ANOMALY, node_id=node.spec.id, flight_id=flight.id,
+                       message=f"ADVISORY: recommend draining {node.spec.name} - {assessment.reason}",
+                       severity="warn", data=assessment.to_dict())
+
+        if assessment.ladder == Ladder.THROTTLE:
+            factor = THROTTLE_FACTOR.get(Ladder.THROTTLE, 0.5)
+            throttled = throttled_weight(flight, factor)
+            flight.weight = throttled.weight
+            flight.metadata = {**flight.metadata, "throttled": True,
+                               "throttle_factor": factor}
+        return None, assessment.ladder
+
+    async def _act_takeoff(self, flight: Flight, decision: Decision,
+                           node: Optional[Node]):
+        """Let the flight fly."""
+        flight.status = FlightStatus.CLEARED
+        self._queued_ids.discard(flight.id)
+        flight.cleared_at = datetime.now(timezone.utc)
+        flight.assigned_node = decision.assigned_node
+        flight.takeoff_at = datetime.now(timezone.utc)
+        flight.status = FlightStatus.IN_FLIGHT
+        if node is not None:
+            node.active_flights.append(flight.id)
+            node.active_weights[flight.id] = flight.weight
+            if flight.id in node.queued_flights:
+                node.queued_flights = [f for f in node.queued_flights if f != flight.id]
+        self._index_scope(flight)
+        if self.storage is not None:
+            await self._store(self.storage.upsert_flight, flight)
 
     def _score_node(self, node: Node, flight: Flight) -> float:
         t = node.telemetry
