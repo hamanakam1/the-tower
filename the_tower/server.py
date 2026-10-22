@@ -7,9 +7,10 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, HTMLResponse, FileResponse
-from starlette.routing import Route, Mount
+from starlette.routing import Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .core import Tower
 from .schemas import (
@@ -26,6 +27,40 @@ class TowerServer:
 
     def _build(self) -> Starlette:
         tower = self.tower
+        connections = set()
+
+        async def broadcast(obj):
+            dead = []
+            for ws in list(connections):
+                try:
+                    await ws.send_json(obj)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                connections.discard(ws)
+
+        async def on_event(ev):
+            await broadcast({"type": "event", "event": ev.model_dump(mode="json")})
+            snap = tower.airspace()
+            await broadcast({"type": "airspace", "airspace": snap.model_dump(mode="json")})
+
+        tower.subscribe_async(on_event)
+
+        async def ws_handler(websocket: WebSocket):
+            await websocket.accept()
+            connections.add(websocket)
+            try:
+                snap = tower.airspace()
+                await websocket.send_json({"type": "airspace", "airspace": snap.model_dump(mode="json")})
+                while True:
+                    msg = await websocket.receive_text()
+                    # allow client to request refresh
+                    if msg == "ping":
+                        await websocket.send_json({"type": "pong"})
+            except WebSocketDisconnect:
+                pass
+            finally:
+                connections.discard(websocket)
 
         async def root(request):
             index = STATIC_DIR / "index.html"
@@ -112,6 +147,37 @@ class TowerServer:
             node_id = request.path_params["node_id"]
             return JSONResponse(tower.trend(node_id))
 
+        async def register_node(request):
+            body = await request.json()
+            from .schemas import NodeSpec
+            spec = NodeSpec(**body)
+            node = tower.register_node(spec)
+            return JSONResponse({"ok": True, "node": node.model_dump(mode="json")})
+
+        async def unregister_node(request):
+            node_id = request.path_params["node_id"]
+            ok = tower.unregister_node(node_id)
+            if not ok:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse({"ok": True})
+
+        async def audit_verify(request):
+            return JSONResponse({"valid": tower.verify_audit()})
+
+        async def audit_log(request):
+            body = await request.json()
+            aid = tower.log_audit(body)
+            return JSONResponse({"audit_id": aid})
+
+        async def conflicts(request):
+            scope = [s for s in request.query_params.get("scope", "").split(",") if s]
+            # build a temp flight-like check using scope_conflict requires Flight; do manual
+            conflicting = []
+            for fid, f in tower.flights.items():
+                if f.status == __import__("the_tower.schemas", fromlist=["FlightStatus"]).FlightStatus.IN_FLIGHT and set(f.scope) & set(scope):
+                    conflicting.append(fid)
+            return JSONResponse({"conflicting_flights": conflicting})
+
         routes = [
             Route("/", root),
             Route("/health", health),
@@ -124,6 +190,12 @@ class TowerServer:
             Route("/flights", flights),
             Route("/trend/{node_id}", trend),
             Route("/ingest/{node_id}", ingest, methods=["POST"]),
+            Route("/nodes", register_node, methods=["POST"]),
+            Route("/nodes/{node_id}", unregister_node, methods=["DELETE"]),
+            Route("/audit/verify", audit_verify),
+            Route("/audit", audit_log, methods=["POST"]),
+            Route("/conflicts", conflicts),
+            WebSocketRoute("/ws", ws_handler),
         ]
 
         app = Starlette(routes=routes)

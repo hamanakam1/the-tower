@@ -399,8 +399,21 @@ function drawRadar() {
 }
 drawRadar();
 
-setInterval(refresh, 2000);
+setInterval(refresh, 5000);
 refresh();
+// WebSocket live push
+try {
+  const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(wsProto + "//" + location.host + "/ws");
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "airspace") { state = msg.airspace; renderNodes(state.nodes); renderFlights(state.flights); renderStats(state.stats); renderNodeSelect(state.nodes); renderTrends(state.nodes); }
+      if (msg.type === "event") { /* prepend */ }
+    } catch(e){}
+  };
+  ws.onopen = () => { console.log("ws open"); };
+} catch(e){ console.warn("ws unavailable", e); }
 
 function tickClock(){ document.getElementById("clock").textContent = new Date().toLocaleTimeString(); }
 setInterval(tickClock,1000); tickClock();

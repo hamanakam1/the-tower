@@ -205,6 +205,7 @@ class Flight(BaseModel):
     weight: ResourceWeight = Field(default_factory=ResourceWeight)
     container_id: Optional[str] = None
     preferred_node: Optional[str] = None
+    scope: List[str] = Field(default_factory=list, description="Resource keys for conflict detection")
     status: FlightStatus = FlightStatus.QUEUED
     submitted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     cleared_at: Optional[datetime] = None

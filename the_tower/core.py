@@ -20,13 +20,22 @@ from .schemas import (
 )
 from .radar import RadarSweep
 from .anomaly import AnomalyRadar
+from .storage import Storage
 
 
 class Tower:
     """Hardware ATC controller."""
 
     def __init__(self, nodes: Optional[List[NodeSpec]] = None, radar_interval_s: float = 5.0,
-                 max_events: int = 500):
+                 max_events: int = 500, db_path: Optional[str] = None):
+        self.db_path = db_path
+        self.storage: Optional[Storage] = Storage(db_path) if db_path else None
+        # load node specs from storage if present
+        if nodes is None and self.storage is not None:
+            specs_map = self.storage.load_node_specs()
+            if specs_map:
+                import json as _j
+                nodes = [NodeSpec(**_j.loads(v)) for v in specs_map.values()]
         specs = nodes if nodes is not None else default_nodes()
         self.nodes: Dict[str, Node] = {}
         for spec in specs:
@@ -58,9 +67,24 @@ class Tower:
         self._lock = asyncio.Lock()
         self._killed_containers: Dict[str, str] = {}  # container_id -> flight_id
         self._subscribers: List[Callable] = []
-
+        self._async_subscribers: List[Callable] = []
+        # persist node specs
+        if self.storage is not None:
+            for spec in specs:
+                self.storage.upsert_node_spec(spec.id, spec.model_dump_json())
     # ---------------- lifecycle ----------------
     async def start(self):
+        # load persisted state
+        if self.storage is not None:
+            for f in self.storage.load_flights():
+                self.flights[f.id] = f
+            for e in self.storage.load_events():
+                self.events.append(e)
+            for nid, node in self.nodes.items():
+                hist = self.storage.load_telemetry(nid, limit=60)
+                if hist:
+                    node.history = hist
+                    node.telemetry = hist[-1]
         # initial sweep to populate real telemetry
         await self.radar.sweep_once()
         await self.radar.start()
@@ -72,6 +96,9 @@ class Tower:
     def subscribe(self, cb: Callable):
         self._subscribers.append(cb)
 
+    def subscribe_async(self, cb: Callable):
+        self._async_subscribers.append(cb)
+
     def _emit(self, kind: EventKind, node_id=None, flight_id=None, message="", severity="info",
               container_id=None, data=None):
         ev = TowerEvent(
@@ -79,14 +106,26 @@ class Tower:
             message=message, severity=severity, data=data or {},
         )
         self.events.append(ev)
+        if self.storage is not None:
+            self.storage.append_event(ev)
         for cb in list(self._subscribers):
             try:
                 cb(ev)
             except Exception:
                 pass
+        for cb in list(self._async_subscribers):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(cb(ev))
+            except Exception:
+                pass
         return ev
 
     async def _on_sweep(self, samples):
+        if self.storage is not None:
+            for nid, node in self.nodes.items():
+                self.storage.append_telemetry(node.telemetry)
         # anomaly analysis per node
         for nid, node in self.nodes.items():
             for ev in self.anomaly.analyze_node(node):
@@ -109,6 +148,8 @@ class Tower:
                 flight.reason = "auto-kill: node redline breach"
                 node.active_flights = [f for f in node.active_flights if f != fid]
                 node.active_weights.pop(fid, None)
+                if self.storage is not None:
+                    self.storage.upsert_flight(flight)
                 self._emit(EventKind.SHOT_DOWN, node_id=node_id, flight_id=fid,
                            message=f"SHOT DOWN {flight.callsign} on {node.spec.name}: redline breach",
                            severity="critical", data={"auto": True})
@@ -127,6 +168,8 @@ class Tower:
                         node.active_flights = [f for f in node.active_flights if f != fid]
                     if node:
                         node.active_weights.pop(fid, None)
+                    if self.storage is not None:
+                        self.storage.upsert_flight(flight)
                     self._emit(EventKind.LANDING, node_id=flight.assigned_node, flight_id=fid,
                                message=f"{flight.callsign} landed on {flight.assigned_node}",
                                severity="info")
@@ -146,11 +189,34 @@ class Tower:
                 flight.status = FlightStatus.SHOT_DOWN
                 flight.shot_down_at = datetime.now(timezone.utc)
                 flight.reason = "rogue flight declared - shot down on approach"
+                if self.storage is not None:
+                    self.storage.upsert_flight(flight)
                 self._emit(EventKind.SHOT_DOWN, flight_id=flight.id,
                            message=f"SHOT DOWN on approach: {flight.callsign} (rogue)",
                            severity="critical")
                 return ClearanceResponse(decision=ClearanceDecision.SHOT_DOWN, flight_id=flight.id,
                                         reason=flight.reason)
+
+            # scope conflict / preemption
+            conflict_id = self.scope_conflict(flight)
+            if conflict_id:
+                existing = self.flights.get(conflict_id)
+                if existing and int(flight.priority) < int(existing.priority):
+                    self._preempt(conflict_id, f"preempted by {flight.callsign} (higher priority)")
+                else:
+                    flight.status = FlightStatus.QUEUED
+                    flight.assigned_node = existing.assigned_node if existing else None
+                    if flight.assigned_node and flight.assigned_node in self.nodes:
+                        self.nodes[flight.assigned_node].queued_flights.append(flight.id)
+                    if self.storage is not None:
+                        self.storage.upsert_flight(flight)
+                    self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
+                               message=f"Queued: {flight.callsign} - scope conflict with {existing.callsign if existing else conflict_id}",
+                               severity="warn")
+                    return ClearanceResponse(decision=ClearanceDecision.QUEUED, flight_id=flight.id,
+                                            assigned_node=flight.assigned_node,
+                                            reason=f"Scope conflict with {existing.callsign if existing else conflict_id}",
+                                            estimated_wait_s=30.0)
 
             # candidate nodes
             candidates = []
@@ -169,6 +235,8 @@ class Tower:
                 flight.assigned_node = node
                 if node:
                     self.nodes[node].queued_flights.append(flight.id)
+                if self.storage is not None:
+                    self.storage.upsert_flight(flight)
                 self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
                            message=f"Denied/queued: {flight.callsign} - no capacity",
                            severity="warn")
@@ -185,6 +253,8 @@ class Tower:
                 flight.status = FlightStatus.SHOT_DOWN
                 flight.shot_down_at = datetime.now(timezone.utc)
                 flight.reason = "anomaly radar: node in runaway state - flight shot down"
+                if self.storage is not None:
+                    self.storage.upsert_flight(flight)
                 self._emit(EventKind.SHOT_DOWN, node_id=best_node.spec.id, flight_id=flight.id,
                            message=f"SHOT DOWN: {flight.callsign} - target node runaway",
                            severity="critical")
@@ -199,6 +269,8 @@ class Tower:
             flight.status = FlightStatus.IN_FLIGHT
             best_node.active_flights.append(flight.id)
             best_node.active_weights[flight.id] = flight.weight
+            if self.storage is not None:
+                self.storage.upsert_flight(flight)
             if flight.id in best_node.queued_flights:
                 best_node.queued_flights = [f for f in best_node.queued_flights if f != flight.id]
             self._emit(EventKind.CLEARANCE_GRANTED, node_id=best_node.spec.id, flight_id=flight.id,
@@ -263,6 +335,8 @@ class Tower:
                     node.queued_flights = [f for f in node.queued_flights if f != flight_id]
                 if node:
                     node.active_weights.pop(flight_id, None)
+                if flight and self.storage is not None:
+                    self.storage.upsert_flight(flight)
             # actual process kill (best effort) for local containers
             killed_proc = False
             try:
@@ -290,6 +364,83 @@ class Tower:
     def get_node(self, node_id: str) -> Optional[Node]:
         return self.nodes.get(node_id)
 
+    # ---------------- node registration ----------------
+    def register_node(self, spec: NodeSpec) -> Node:
+        if spec.id in self.nodes:
+            return self.nodes[spec.id]
+        node = Node(
+            spec=spec,
+            status=NodeStatus.ONLINE,
+            telemetry=Telemetry(
+                node_id=spec.id,
+                timestamp=datetime.now(timezone.utc),
+                cpu_percent=10.0,
+                memory_percent=20.0,
+                memory_used_gb=spec.memory_gb * 0.2,
+                memory_total_gb=spec.memory_gb,
+                temperature_c=spec.redline_temp_c * 0.5,
+                power_watts=spec.max_power_watts * 0.2,
+                bandwidth_mbps=0.0,
+                load_avg=0.5,
+                thermal_state=ThermalState.NOMINAL,
+            ),
+        )
+        self.nodes[spec.id] = node
+        self.radar.nodes[spec.id] = node
+        if self.storage is not None:
+            self.storage.upsert_node_spec(spec.id, spec.model_dump_json())
+        self._emit(EventKind.NODE_ONLINE, node_id=spec.id,
+                   message=f"Node registered: {spec.name}", severity="info")
+        return node
+
+    def unregister_node(self, node_id: str) -> bool:
+        if node_id not in self.nodes:
+            return False
+        # shoot down flights on that node
+        node = self.nodes[node_id]
+        for fid in list(node.active_flights):
+            f = self.flights.get(fid)
+            if f:
+                f.status = FlightStatus.SHOT_DOWN
+                f.shot_down_at = datetime.now(timezone.utc)
+                f.reason = "node unregistered"
+                if self.storage is not None:
+                    self.storage.upsert_flight(f)
+        del self.nodes[node_id]
+        self.radar.nodes.pop(node_id, None)
+        self._emit(EventKind.NODE_OFFLINE, node_id=node_id,
+                   message=f"Node unregistered: {node_id}", severity="warn")
+        return True
+
+    # ---------------- conflict detection ----------------
+    def scope_conflict(self, flight: Flight) -> Optional[str]:
+        if not flight.scope:
+            return None
+        for fid, f in self.flights.items():
+            if f.status != FlightStatus.IN_FLIGHT:
+                continue
+            if not f.scope:
+                continue
+            if set(f.scope) & set(flight.scope):
+                return fid
+        return None
+
+    def _preempt(self, flight_id: str, reason: str):
+        f = self.flights.get(flight_id)
+        if not f or f.status != FlightStatus.IN_FLIGHT:
+            return
+        f.status = FlightStatus.SHOT_DOWN
+        f.shot_down_at = datetime.now(timezone.utc)
+        f.reason = reason
+        node = self.nodes.get(f.assigned_node) if f.assigned_node else None
+        if node:
+            node.active_flights = [x for x in node.active_flights if x != flight_id]
+            node.active_weights.pop(flight_id, None)
+        if self.storage is not None:
+            self.storage.upsert_flight(f)
+        self._emit(EventKind.SHOT_DOWN, node_id=f.assigned_node, flight_id=flight_id,
+                   message=f"PREEMPTED {f.callsign}: {reason}", severity="critical")
+
     def radar_snapshot(self) -> List[Node]:
         return list(self.nodes.values())
 
@@ -316,6 +467,17 @@ class Tower:
         if not node:
             return {}
         return self.anomaly.trend_summary(node)
+
+    # ---------------- audit ----------------
+    def log_audit(self, payload: Dict[str, Any]) -> Optional[str]:
+        if self.storage is None:
+            return None
+        return self.storage.append_audit(payload)
+
+    def verify_audit(self) -> bool:
+        if self.storage is None:
+            return True
+        return self.storage.verify_audit_chain()
 
     def ingest_telemetry(self, node_id: str, telem: Telemetry) -> bool:
         node = self.nodes.get(node_id)
