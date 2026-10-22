@@ -116,13 +116,15 @@ class TowerServer:
             # allow shorthand: if body has "task" instead of full flight, build one
             if "flight" not in body and "work_package" not in body:
                 from .schemas import Flight, ResourceWeight, FlightPriority
+                constraints = body.get("constraints") or {}
                 flight = Flight(
                     task=body.get("task", body.get("true_goal", "unnamed task")),
                     requester=body.get("requester", "api"),
                     priority=FlightPriority(body.get("priority", 2)),
                     weight=ResourceWeight(**body.get("weight", {})),
                     container_id=body.get("container_id"),
-                    preferred_node=body.get("preferred_node"),
+                    preferred_node=(body.get("preferred_node")
+                                    or constraints.get("preferred_node")),
                     rogue=bool(body.get("rogue", False)),
                     callsign=body.get("callsign", ""),
                     scope=body.get("scope", []),

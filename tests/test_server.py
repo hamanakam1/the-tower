@@ -162,3 +162,63 @@ def test_replay_endpoint_reproduces_a_decision(client):
     assert r2.status_code == 200
     assert "replayed" in r2.json()
     assert "comparison" in r2.json()
+
+
+def test_scope_conflict_survives_the_http_shorthand(client):
+    """Roadmap 0.3: the shorthand body must forward `scope`."""
+    first = client.post("/clearance", json={
+        "task": "holder", "scope": ["data/train"],
+        "weight": {"cpu_cores": 1, "memory_gb": 1, "duration_est_s": 600},
+    })
+    assert first.status_code == 200
+    second = client.post("/clearance", json={
+        "task": "contender", "scope": ["data/train"], "priority": 2,
+        "weight": {"cpu_cores": 1, "memory_gb": 1, "duration_est_s": 5},
+    })
+    assert second.status_code == 200
+    assert second.json()["decision"] == "queued"
+    assert "scope conflict" in second.json()["reason"].lower()
+
+
+def test_gpu_units_survive_the_http_shorthand(client):
+    r = client.post("/clearance", json={
+        "task": "gpu job", "weight": {"cpu_cores": 1, "memory_gb": 1,
+                                       "gpu_units": 2, "duration_est_s": 5}})
+    assert r.status_code == 200
+    fid = r.json()["flight_id"]
+    detail = client.get(f"/flights/{fid}")
+    assert detail.json()["flight"]["weight"]["gpu_units"] == 2
+
+
+def test_constraints_survive_the_http_shorthand(client):
+    r = client.post("/clearance", json={
+        "task": "pinned", "constraints": {"preferred_node": "pi-cluster"},
+        "weight": {"cpu_cores": 1, "memory_gb": 1, "duration_est_s": 5}})
+    assert r.status_code == 200
+    fid = r.json()["flight_id"]
+    detail = client.get(f"/flights/{fid}")
+    assert detail.json()["flight"]["preferred_node"] == "pi-cluster"
+
+
+def test_kill_requires_a_reason(client):
+    r = client.post("/kill/ctr-noreason", json={"reason": ""})
+    assert r.status_code == 200
+    assert r.json()["success"] is False
+    assert "reason" in r.json()["message"].lower()
+
+
+def test_kill_refuses_an_unowned_pid(client):
+    # a numeric container id that the Tower never registered is not ours
+    r = client.post("/kill/999999", json={"reason": "test"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True  # the flight record is closed...
+    assert "proc terminated" not in body["message"]  # ...but no signal was sent
+
+
+def test_node_state_endpoint(client):
+    r = client.post("/nodes/m3max/state", json={"state": "draining"})
+    assert r.status_code == 200
+    assert r.json()["node"]["status"] == "draining"
+    r2 = client.post("/nodes/m3max/state", json={"state": "nonsense"})
+    assert r2.status_code == 400

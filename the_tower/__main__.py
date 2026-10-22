@@ -32,6 +32,9 @@ def build_parser():
     demo.add_argument("--port", type=int, default=8765)
     demo.add_argument("--count", type=int, default=5)
 
+    config_parser = sub.add_parser("config", help="Show the effective configuration")
+    config_parser.add_argument("--config", default=None, help="YAML config file")
+
     agent = sub.add_parser("agent", help="Run telemetry agent pushing local metrics to a Tower")
     agent.add_argument("--tower", default="http://127.0.0.1:8765")
     agent.add_argument("--node-id", default=None)
@@ -44,26 +47,12 @@ def build_parser():
 async def cmd_serve(args):
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    import yaml
-    db_path = args.db
-    interval = args.interval
-    nodes = None
-    if args.config and Path(args.config).exists():
-        with open(args.config) as f:
-            cfg = yaml.safe_load(f) or {}
-        db_path = cfg.get("db_path", db_path)
-        interval = cfg.get("radar_interval", interval)
-        if cfg.get("token"):
-            import os
-            os.environ.setdefault("TOWER_TOKEN", str(cfg["token"]))
-        if cfg.get("rate_limit") is not None:
-            import os
-            os.environ.setdefault("TOWER_RATE_LIMIT", str(cfg["rate_limit"]))
-        if cfg.get("nodes"):
-            from .schemas import NodeSpec
-            nodes = [NodeSpec(**n) for n in cfg["nodes"]]
-    if db_path is None:
-        db_path = str(Path.home() / ".the-tower" / "tower.sqlite")
+    from .config import load_config
+    cfg = load_config(args.config)
+    cfg.apply_to_env()
+    db_path = args.db or cfg.db_path
+    interval = args.interval if args.interval != 5.0 else cfg.radar_interval
+    nodes = cfg.nodes or None
     tower = Tower(nodes=nodes, radar_interval_s=interval, db_path=db_path)
     await tower.start()
     srv = TowerServer(tower)
@@ -129,6 +118,13 @@ async def cmd_demo(args):
             print(r.status_code, r.json().get("decision"), body["task"])
     print("demo seeded")
 
+def cmd_config(args):
+    from .config import load_config
+    cfg = load_config(args.config)
+    print(json.dumps(cfg.to_dict(), indent=2))
+    return 0
+
+
 def main():
     args = build_parser().parse_args()
     if args.command == "serve":
@@ -139,6 +135,8 @@ def main():
         asyncio.run(cmd_status(args))
     elif args.command == "demo":
         asyncio.run(cmd_demo(args))
+    elif args.command == "config":
+        sys.exit(cmd_config(args))
     elif args.command == "agent":
         import platform
         node_id = args.node_id or platform.node()
