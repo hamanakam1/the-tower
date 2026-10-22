@@ -25,6 +25,12 @@
   /__________________________________\
 ```
 
+[![CI](https://github.com/hamanakam1/the-tower/actions/workflows/ci.yml/badge.svg)](https://github.com/hamanakam1/the-tower/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Python: 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ed)](Dockerfile)
+[![Releases](https://img.shields.io/github/v/release/hamanakam1/the-tower)](https://github.com/hamanakam1/the-tower/releases)
+
 **Hardware Air Traffic Control for the Autonomous Mesh**
 
 The Tower sits above the execution layer, monitors the physical airspace, clears compute tasks for takeoff, and ruthlessly shoots down rogue flights before they melt a motherboard.
