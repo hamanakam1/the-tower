@@ -100,16 +100,18 @@ same console on a narrow viewport:
 - **Radar Sweep** - 5-second telemetry polling across all nodes (real psutil + simulated edge nodes)
 - **Pure Policy Core** - Admission is a pure function of a frozen snapshot (`the_tower/policy.py`): no I/O, no clock, replayable
 - **Safety Ladder** - Graded enforcement: admit → warn → throttle → drain → kill (`the_tower/safety.py`)
+- **Leases** - Time-bounded claims on node resources, with renewal, expiry and automatic rescheduling
+- **Node Lifecycle** - `online → draining → cordoned → maintenance → offline → unknown`
 - **Flight Clearance** - Dynamic dispatch algorithm based on resource weight and node scoring
 - **Anomaly Radar** - Predictive ML on thermal/memory/power trends (linear regression + z-score spikes)
-- **Anti-Air Battery** - Hard-kill switch for runaway processes and stale containers
+- **Anti-Air Battery** - Hard-kill switch for runaway processes and stale containers; a kill requires a reason, only touches processes the Tower owns, and drains the node first
 - **Scope Conflicts** - Resource-key conflict detection with priority preemption
 - **Priority Dispatch Queue** - Queued flights re-dispatched when capacity frees
 - **Container Registry** - Heartbeat-based liveness with auto-kill on timeout
 - **Freshness** - Stale telemetry makes a node `unknown`, and unknown nodes are never scheduled onto
 - **Advisory Mode** - Per-node opt-in: the Tower recommends instead of acting
-- **Explainability** - Every clearance carries the node state it saw, the score of every candidate and a policy version
-- **Persistence** - SQLite-backed flights, events, telemetry, audit hash chain, versioned migrations
+- **Explainability** - Every clearance carries the node state it saw, the score of every candidate and a policy version — and can be replayed later
+- **Persistence** - SQLite-backed flights, events, telemetry, audit hash chain, versioned migrations, rolled-up telemetry
 - **Live Push** - WebSocket airspace broadcasts
 - **Auth** - Optional bearer token for mutating endpoints
 - **Metrics** - Prometheus `/metrics` endpoint
@@ -130,7 +132,10 @@ same console on a narrow viewport:
 pip install -e .
 the-tower serve            # API + dashboard on http://127.0.0.1:8765
 the-tower radar            # one-shot telemetry sweep
-the-tower status           # node health
+the-tower status --watch   # node health, live
+the-tower config           # the effective configuration
+the-tower demo             # seed demo flights against a running Tower
+the-tower agent --tower http://<tower>:8765 --node-id pi-01   # node agent
 ```
 
 ### Container image
@@ -170,6 +175,12 @@ volume. See the [package on GitHub](https://github.com/hamanakam1/the-tower/pkgs
 - `GET /safety/ladder` - Enforcement ladder state per node
 - `POST /nodes/:id/enforcement` - Switch a node between `advisory` and `enforce`
 - `GET /history/:node` - Recent telemetry samples for a node
+- `GET /rollup` - Rolled-up telemetry history
+- `GET /leases` - Active resource leases
+- `POST /leases/:id/renew` - Renew a lease
+- `DELETE /leases/:id` - Release a lease
+- `GET /decisions` - Recorded clearance decisions
+- `POST /replay` - Re-derive a decision from its recorded snapshot
 
 ## Visualization
 
