@@ -72,6 +72,10 @@ class Tower:
         self._subscribers: List[Callable] = []
         self._async_subscribers: List[Callable] = []
         self.containers: Dict[str, Dict[str, Any]] = {}  # container_id -> info
+        # scope key -> flight ids that claim it (only in-flight ones matter)
+        self._scope_index: Dict[str, List[str]] = {}
+        # flight ids currently waiting for clearance
+        self._queued_ids: set = set()
         # persist node specs
         if self.storage is not None:
             for spec in specs:
@@ -84,6 +88,10 @@ class Tower:
         if self.storage is not None:
             for f in await self._store(self.storage.load_flights) or []:
                 self.flights[f.id] = f
+                if f.status == FlightStatus.IN_FLIGHT:
+                    self._index_scope(f)
+                elif f.status == FlightStatus.QUEUED:
+                    self._queued_ids.add(f.id)
             for e in await self._store(self.storage.load_events) or []:
                 self.events.append(e)
             for nid, node in self.nodes.items():
@@ -177,15 +185,18 @@ class Tower:
             if flight and flight.status == FlightStatus.IN_FLIGHT:
                 node.active_flights = [f for f in node.active_flights if f != fid]
                 node.active_weights.pop(fid, None)
+                self._deindex_scope(flight)
                 if flight.retries < flight.max_retries:
                     flight.retries += 1
                     flight.status = FlightStatus.QUEUED
+                    self._queued_ids.add(fid)
                     flight.assigned_node = None
                     flight.takeoff_at = None
                     flight.cleared_at = None
                     flight.reason = f"retry {flight.retries}/{flight.max_retries}: node redline breach"
                 else:
                     flight.status = FlightStatus.SHOT_DOWN
+                    self._queued_ids.discard(fid)
                     flight.shot_down_at = datetime.now(timezone.utc)
                     flight.reason = "auto-kill: node redline breach (max retries)"
                 if self.storage is not None:
@@ -202,12 +213,14 @@ class Tower:
                 if elapsed >= flight.weight.duration_est_s:
                     # land
                     flight.status = FlightStatus.LANDED
+                    self._queued_ids.discard(fid)
                     flight.landed_at = now
                     node = self.nodes.get(flight.assigned_node) if flight.assigned_node else None
                     if node and fid in node.active_flights:
                         node.active_flights = [f for f in node.active_flights if f != fid]
                     if node:
                         node.active_weights.pop(fid, None)
+                    self._deindex_scope(flight)
                     if self.storage is not None:
                         await self._store(self.storage.upsert_flight, flight)
                     self._emit(EventKind.LANDING, node_id=flight.assigned_node, flight_id=fid,
@@ -215,17 +228,22 @@ class Tower:
                                severity="info")
 
     async def _dispatch_queued(self):
-        queued = sorted(
-            [f for f in self.flights.values() if f.status == FlightStatus.QUEUED],
-            key=lambda f: (int(f.priority), f.submitted_at),
-        )
+        # The queued index keeps this proportional to the number of *waiting*
+        # flights instead of the total flight history.
+        if not self._queued_ids:
+            return
+        queued = [self.flights[fid] for fid in list(self._queued_ids)
+                  if fid in self.flights and self.flights[fid].status == FlightStatus.QUEUED]
+        if not queued:
+            return
+        queued.sort(key=lambda f: (int(f.priority), f.submitted_at))
         for f in queued:
             if f.status != FlightStatus.QUEUED:
                 continue
             try:
                 await self.request_clearance(ClearanceRequest(flight=f))
             except Exception as e:
-                print(f"dispatch error: {e}")
+                logger.warning("dispatch error: %s", e)
 
     # ---------------- clearance ----------------
     async def request_clearance(self, req: ClearanceRequest) -> ClearanceResponse:
@@ -240,6 +258,7 @@ class Tower:
             # rogue detection pre-check
             if flight.rogue:
                 flight.status = FlightStatus.SHOT_DOWN
+                self._queued_ids.discard(flight.id)
                 flight.shot_down_at = datetime.now(timezone.utc)
                 flight.reason = "rogue flight declared - shot down on approach"
                 if self.storage is not None:
@@ -258,6 +277,7 @@ class Tower:
                     await self._preempt(conflict_id, f"preempted by {flight.callsign} (higher priority)")
                 else:
                     flight.status = FlightStatus.QUEUED
+                    self._queued_ids.add(flight.id)
                     flight.assigned_node = existing.assigned_node if existing else None
                     if flight.assigned_node and flight.assigned_node in self.nodes:
                         self.nodes[flight.assigned_node].queued_flights.append(flight.id)
@@ -284,6 +304,7 @@ class Tower:
             if not candidates:
                 # maybe queue if any node could accept after current flights land? deny for now with queue
                 flight.status = FlightStatus.QUEUED
+                self._queued_ids.add(flight.id)
                 node = self._best_eventual_node(flight)
                 flight.assigned_node = node
                 if node:
@@ -304,6 +325,7 @@ class Tower:
             # anomaly check: would this flight be rogue on best node?
             if self.anomaly.is_rogue_flight(best_node):
                 flight.status = FlightStatus.SHOT_DOWN
+                self._queued_ids.discard(flight.id)
                 flight.shot_down_at = datetime.now(timezone.utc)
                 flight.reason = "anomaly radar: node in runaway state - flight shot down"
                 if self.storage is not None:
@@ -316,12 +338,14 @@ class Tower:
 
             # clear for takeoff
             flight.status = FlightStatus.CLEARED
+            self._queued_ids.discard(flight.id)
             flight.cleared_at = datetime.now(timezone.utc)
             flight.assigned_node = best_node.spec.id
             flight.takeoff_at = datetime.now(timezone.utc)
             flight.status = FlightStatus.IN_FLIGHT
             best_node.active_flights.append(flight.id)
             best_node.active_weights[flight.id] = flight.weight
+            self._index_scope(flight)
             if self.storage is not None:
                 await self._store(self.storage.upsert_flight, flight)
             if flight.id in best_node.queued_flights:
@@ -380,6 +404,7 @@ class Tower:
                 node_id = flight.assigned_node
                 if flight.status in (FlightStatus.IN_FLIGHT, FlightStatus.CLEARED, FlightStatus.QUEUED):
                     flight.status = FlightStatus.SHOT_DOWN
+                    self._queued_ids.discard(flight.id)
                     flight.shot_down_at = datetime.now(timezone.utc)
                     flight.reason = f"killed: {req.reason}"
                 node = self.nodes.get(node_id) if node_id else None
@@ -389,6 +414,8 @@ class Tower:
                     node.queued_flights = [f for f in node.queued_flights if f != flight_id]
                 if node:
                     node.active_weights.pop(flight_id, None)
+                if flight:
+                    self._deindex_scope(flight)
                 if flight and self.storage is not None:
                     await self._store(self.storage.upsert_flight, flight)
             # actual process kill (best effort) for local containers
@@ -481,16 +508,36 @@ class Tower:
 
     # ---------------- conflict detection ----------------
     def scope_conflict(self, flight: Flight) -> Optional[str]:
+        """Return the id of an in-flight flight that shares a scope key.
+
+        Uses the scope index rather than scanning every flight, so the cost
+        is proportional to the number of *conflicting* flights, not to the
+        size of the flight history.
+        """
         if not flight.scope:
             return None
-        for fid, f in self.flights.items():
-            if f.status != FlightStatus.IN_FLIGHT:
-                continue
-            if not f.scope:
-                continue
-            if set(f.scope) & set(flight.scope):
-                return fid
+        for key in flight.scope:
+            for fid in self._scope_index.get(key, ()):  # usually 0 or 1 entries
+                f = self.flights.get(fid)
+                if f is None:
+                    continue
+                if f.status != FlightStatus.IN_FLIGHT:
+                    continue
+                if set(f.scope) & set(flight.scope):
+                    return fid
         return None
+
+    def _index_scope(self, flight: Flight):
+        for key in flight.scope:
+            bucket = self._scope_index.setdefault(key, [])
+            if flight.id not in bucket:
+                bucket.append(flight.id)
+
+    def _deindex_scope(self, flight: Flight):
+        for key in flight.scope:
+            bucket = self._scope_index.get(key)
+            if bucket and flight.id in bucket:
+                bucket.remove(flight.id)
 
     async def _preempt(self, flight_id: str, reason: str):
         f = self.flights.get(flight_id)
@@ -503,6 +550,7 @@ class Tower:
         if node:
             node.active_flights = [x for x in node.active_flights if x != flight_id]
             node.active_weights.pop(flight_id, None)
+        self._deindex_scope(f)
         if self.storage is not None:
             await self._store(self.storage.upsert_flight, f)
         self._emit(EventKind.SHOT_DOWN, node_id=f.assigned_node, flight_id=flight_id,

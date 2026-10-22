@@ -104,6 +104,93 @@ async def test_container_stale_kill(tower):
 
 
 @pytest.mark.asyncio
+async def test_scope_index_tracks_in_flight_only(tower):
+    from the_tower.schemas import Flight, ResourceWeight, ClearanceRequest
+    f = Flight(task="indexed", scope=["k1"], weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=1))
+    await tower.request_clearance(ClearanceRequest(flight=f))
+    assert "k1" in tower._scope_index
+    assert f.id in tower._scope_index["k1"]
+    # after landing the flight leaves the index
+    f.takeoff_at = f.takeoff_at.replace(year=2000)
+    await tower._progress_flights()
+    assert f.status.value == "landed"
+    assert f.id not in tower._scope_index.get("k1", [])
+
+
+@pytest.mark.asyncio
+async def test_dispatch_queue_promotes_queued_flight_when_capacity_frees():
+    from the_tower.core import Tower
+    from the_tower.schemas import (NodeSpec, Flight, ResourceWeight,
+                                   ClearanceRequest, FlightPriority, Telemetry,
+                                   ThermalState)
+
+    spec = NodeSpec(id="tiny", name="Tiny", role="test", specs="x", constraints="y",
+                    cpu_cores=2.0, memory_gb=4.0, redline_temp_c=90.0,
+                    max_power_watts=50.0, network_capacity_mbps=100.0)
+    t = Tower(nodes=[spec])
+    await t.start()
+    # deterministic telemetry: nothing used yet (set after start so the
+    # initial radar sweep does not overwrite it)
+    t.nodes["tiny"].telemetry = Telemetry(
+        node_id="tiny", cpu_percent=0.0, memory_percent=0.0, memory_used_gb=0.0,
+        memory_total_gb=4.0, temperature_c=30.0, power_watts=5.0,
+        bandwidth_mbps=0.0, load_avg=0.0, thermal_state=ThermalState.NOMINAL)
+
+    hog = Flight(task="hog", weight=ResourceWeight(cpu_cores=2, memory_gb=4, duration_est_s=600))
+    await t.request_clearance(ClearanceRequest(flight=hog))
+    assert hog.status.value == "in_flight"
+
+    queued = Flight(task="later", weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
+    await t.request_clearance(ClearanceRequest(flight=queued))
+    assert queued.status.value == "queued"
+
+    # hog lands -> queued flight is promoted
+    hog.takeoff_at = hog.takeoff_at.replace(year=2000)
+    await t._progress_flights()
+    await t._dispatch_queued()
+    assert queued.status.value == "in_flight"
+    await t.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_queue_serves_highest_priority_first():
+    from the_tower.core import Tower
+    from the_tower.schemas import (NodeSpec, Flight, ResourceWeight,
+                                   ClearanceRequest, FlightPriority, Telemetry,
+                                   ThermalState)
+
+    # one single-core slot, so exactly one of the queued flights can take off
+    spec = NodeSpec(id="tiny2", name="Tiny2", role="test", specs="x", constraints="y",
+                    cpu_cores=1.0, memory_gb=4.0, redline_temp_c=90.0,
+                    max_power_watts=50.0, network_capacity_mbps=100.0)
+    t = Tower(nodes=[spec])
+    await t.start()
+    t.nodes["tiny2"].telemetry = Telemetry(
+        node_id="tiny2", cpu_percent=0.0, memory_percent=0.0, memory_used_gb=0.0,
+        memory_total_gb=4.0, temperature_c=30.0, power_watts=5.0,
+        bandwidth_mbps=0.0, load_avg=0.0, thermal_state=ThermalState.NOMINAL)
+
+    hog = Flight(task="hog", weight=ResourceWeight(cpu_cores=1, memory_gb=4, duration_est_s=600))
+    await t.request_clearance(ClearanceRequest(flight=hog))
+
+    low = Flight(task="low", priority=FlightPriority.P3,
+                 weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
+    high = Flight(task="high", priority=FlightPriority.P0,
+                  weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
+    await t.request_clearance(ClearanceRequest(flight=low))
+    await t.request_clearance(ClearanceRequest(flight=high))
+    assert low.status.value == "queued" and high.status.value == "queued"
+
+    # only one slot frees up -> the higher priority flight takes it
+    hog.takeoff_at = hog.takeoff_at.replace(year=2000)
+    await t._progress_flights()
+    await t._dispatch_queued()
+    assert high.status.value == "in_flight"
+    assert low.status.value == "queued"
+    await t.stop()
+
+
+@pytest.mark.asyncio
 async def test_node_registration(tower):
     from the_tower.schemas import NodeSpec
     spec = NodeSpec(id="newnode", name="New Node", role="test", specs="x", constraints="y",

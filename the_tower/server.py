@@ -311,6 +311,11 @@ class TowerServer:
                     now = time.time()
                     b = _buckets.get(ip)
                     if b is None or now - b[0] > 60:
+                        # prune expired buckets so the table cannot grow
+                        # without bound on a long-lived server
+                        if len(_buckets) > 1024:
+                            for k in [k for k, v in _buckets.items() if now - v[0] > 60]:
+                                _buckets.pop(k, None)
                         _buckets[ip] = [now, 1]
                     else:
                         b[1] += 1
