@@ -49,6 +49,33 @@ TTTTT H   H EEEEE TTTTT  OOO  W   W EEEEE RRRR
 
 Unlike cloud-native applications that assume infinite compute, The Tower operates in the physical realm - monitoring thermals, power, memory, and bandwidth across a heterogeneous mesh of Apple Silicon, Raspberry Pi nodes, and off-grid solar-powered trailer compute.
 
+## The dashboard
+
+![The Tower dashboard: the radar sweep, the flight board, the clearance request form, the event log and the node telemetry](docs/screenshots/dashboard-overview.png)
+
+One page, everything the tower knows. The radar sweep plots the nodes by
+bearing and range; the flight board lists every task in the air, in flight or
+queued; the event log is the audit trail; and the node panel reports the live
+thermals, memory and power of each machine in the mesh.
+
+<table>
+  <tr>
+    <td width="50%"><img alt="the radar sweep, plotting the nodes by bearing and range" src="docs/screenshots/radar.png"><br><sub><b>radar</b> &mdash; one sweep across every node, five seconds apart. Bearing and range, so you can see who is crowding whom.</sub></td>
+    <td width="50%"><img alt="the flight board, listing every task in the air" src="docs/screenshots/flight-board.png"><br><sub><b>flight board</b> &mdash; every task in the air, in flight, or queued, with the node it is assigned to and why it was denied.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img alt="the node panel, reporting live thermals, memory and power" src="docs/screenshots/nodes.png"><br><sub><b>nodes</b> &mdash; live CPU, memory, temperature and power per machine, with the redline that triggers the kill-switch.</sub></td>
+    <td width="50%"><img alt="the event log, the audit trail of every clearance decision" src="docs/screenshots/event-log.png"><br><sub><b>event log</b> &mdash; every clearance request, denial and kill, in the order it happened. This is the record you read after something goes wrong.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img alt="the anti-air battery, the hard kill-switch" src="docs/screenshots/anti-air-battery.png"><br><sub><b>anti-air battery</b> &mdash; the hard kill. Name a container and it dies; no approval, no grace period.</sub></td>
+    <td width="50%"><img alt="the trends panel, tracking thermal slope and the power redline" src="docs/screenshots/trends.png"><br><sub><b>trends</b> &mdash; thermal slope and memory slope per node, and the estimated time to the power redline. A node that is trending to failure gets warned about before it fails.</sub></td>
+  </tr>
+</table>
+
+Every screenshot above was captured from a running Tower seeded with the
+synthetic demo fleet, so the callsigns and the telemetry are fictional.
+
 ## Architecture
 
 1. **Panther** → Captures raw multimodal signals
@@ -163,4 +190,4 @@ closes it.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
