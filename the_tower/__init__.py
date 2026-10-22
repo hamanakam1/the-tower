@@ -5,5 +5,5 @@ compute tasks for takeoff, and ruthlessly shoots down rogue flights before
 they melt a motherboard.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = ["__version__"]

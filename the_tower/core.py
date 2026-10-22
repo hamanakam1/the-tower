@@ -78,6 +78,8 @@ class Tower:
                 self.storage.upsert_node_spec(spec.id, spec.model_dump_json())
     # ---------------- lifecycle ----------------
     async def start(self):
+        import time
+        self._started_at = time.time()
         # load persisted state
         if self.storage is not None:
             for f in self.storage.load_flights():

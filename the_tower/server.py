@@ -79,7 +79,17 @@ class TowerServer:
             return HTMLResponse("<h1>The Tower</h1><p>Dashboard not found.</p>")
 
         async def health(request):
-            return JSONResponse({"status": "ok", "service": "the-tower"})
+            import time
+            start = getattr(tower, "_started_at", None)
+            uptime = (time.time() - start) if start else None
+            return JSONResponse({
+                "status": "ok",
+                "service": "the-tower",
+                "version": "0.3.0",
+                "nodes": len(tower.nodes),
+                "flights": len(tower.flights),
+                "uptime_s": uptime,
+            })
 
         async def radar(request):
             nodes = tower.radar_snapshot()
