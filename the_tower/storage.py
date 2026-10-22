@@ -424,6 +424,22 @@ class Storage:
         return aid
 
     @_serialised
+    def load_decisions(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Clearance decisions, newest first, with their recorded snapshots."""
+        rows = self.conn.execute(
+            "SELECT payload_json FROM audit WHERE payload_json LIKE '%\"kind\": \"clearance\"%' "
+            "OR payload_json LIKE '%\"kind\":\"clearance\"%' ORDER BY rowid DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                out.append(json.loads(r["payload_json"]))
+            except Exception:
+                continue
+        return out
+
+    @_serialised
     def verify_audit_chain(self) -> bool:
         rows = self.conn.execute(
             "SELECT content_hash, previous_hash FROM audit ORDER BY rowid"

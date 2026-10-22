@@ -15,6 +15,7 @@ import os
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .core import Tower
+from .replay import replay, compare, snapshot_to_dict, snapshot_from_dict
 from .schemas import (
     ClearanceRequest, Flight, KillRequest, Telemetry, AirspaceSnapshot,
 )
@@ -190,6 +191,37 @@ class TowerServer:
         async def safety_ladder(request):
             return JSONResponse(tower.ladder())
 
+        async def decisions(request):
+            limit = int(request.query_params.get("limit", 50))
+            if tower.storage is None:
+                return JSONResponse({"decisions": []})
+            rows = await tower._store(tower.storage.load_decisions, limit) or []
+            # strip the bulky snapshot unless it is asked for
+            include_snapshot = request.query_params.get("snapshot") == "1"
+            out = []
+            for row in rows:
+                if not include_snapshot:
+                    row = {k: v for k, v in row.items() if k != "snapshot"}
+                out.append(row)
+            return JSONResponse({"decisions": out})
+
+        async def replay_decision(request):
+            body = await request.json()
+            from .schemas import Flight
+            flight_data = body.get("flight") or {}
+            snap = body.get("snapshot")
+            original = body.get("admission")
+            if snap is None and original and "snapshot" in original:
+                snap = original["snapshot"]
+            if snap is None:
+                return JSONResponse({"error": "snapshot required"}, status_code=400)
+            flight = Flight(**flight_data) if flight_data else Flight(task="replay")
+            result = replay(flight, snap)
+            payload = {"replayed": result.to_dict()}
+            if original:
+                payload["comparison"] = compare(original, result)
+            return JSONResponse(payload)
+
         async def kill(request):
             body = {}
             try:
@@ -325,6 +357,8 @@ class TowerServer:
             Route("/clearance/v2", clearance_v2, methods=["POST"]),
             Route("/decision/last", last_decision),
             Route("/safety/ladder", safety_ladder),
+            Route("/decisions", decisions),
+            Route("/replay", replay_decision, methods=["POST"]),
             Route("/kill/{container_id}", kill, methods=["POST"]),
             Route("/airspace", airspace),
             Route("/events", events),

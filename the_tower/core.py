@@ -23,6 +23,7 @@ from .anomaly import AnomalyRadar
 from .storage import Storage
 from .policy import MeshSnapshot, NodeView, ScopeView, Decision, decide, POLICY_VERSION
 from .safety import Ladder, assess, throttled_weight, THROTTLE_FACTOR, ladder_summary
+from .replay import snapshot_to_dict, snapshot_from_dict, replay, compare
 import logging
 
 logger = logging.getLogger("the_tower")
@@ -474,6 +475,9 @@ class Tower:
                 "reason": decision.reason,
                 "ladder": ladder.value,
                 "admission": decision.to_dict(),
+                # the mesh state this decision was made against, so the
+                # decision can be replayed later
+                "snapshot": snapshot_to_dict(snap),
             })
             self._emit(EventKind.CLEARANCE_GRANTED, node_id=decision.assigned_node, flight_id=flight.id,
                        message=f"CLEARED FOR TAKEOFF: {flight.callsign} -> {best_node.spec.name if best_node else decision.assigned_node}",

@@ -136,3 +136,29 @@ def test_last_decision_endpoint(client):
     r = client.get("/decision/last")
     assert r.status_code == 200
     assert r.json()["decision"] in ("cleared", "queued", "shot_down", "denied")
+
+
+def test_safety_ladder_endpoint(client):
+    r = client.get("/safety/ladder")
+    assert r.status_code == 200
+    assert "nodes" in r.json()
+    assert "counts" in r.json()
+
+
+def test_replay_endpoint_reproduces_a_decision(client):
+    r = client.post("/clearance", json={"task": "replayable",
+                                        "weight": {"cpu_cores": 1, "memory_gb": 1}})
+    assert r.status_code == 200
+    admission = r.json()["admission"]
+    # rebuild the recorded snapshot from the live mesh is not possible
+    # without storage, so replay against an explicit snapshot
+    snap = {"nodes": [], "in_flight": [], "queued_count": 0}
+    r2 = client.post("/replay", json={
+        "flight": {"task": "replayable",
+                   "weight": {"cpu_cores": 1, "memory_gb": 1, "duration_est_s": 5}},
+        "snapshot": snap,
+        "admission": admission,
+    })
+    assert r2.status_code == 200
+    assert "replayed" in r2.json()
+    assert "comparison" in r2.json()
