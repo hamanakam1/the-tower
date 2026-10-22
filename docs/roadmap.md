@@ -138,7 +138,7 @@ what was intended.
 | 0.4 | Pluggable sampler per node | **done** | `the_tower/sensors.py`, `NodeSpec.sampler` (`local` / `simulated` / `agent`) |
 | 0.5 | Kill guard: owned PIDs only, reason required, drain first | **done** | `core.py::kill`; `NodeStatus.DRAINING` |
 | 0.6 | Audit every decision | **done** | clearance, queue, preempt, kill, drain, node state, enforcement change |
-| 0.7 | SQLite migrations (numbered, forward) | **done** | `the_tower/storage.py::MIGRATIONS`; rollback is still to do |
+| 0.7 | SQLite migrations (numbered, forward, with rollback) | **done** | `the_tower/storage.py::MIGRATIONS` and `ROLLBACKS` |
 | 0.8 | Telemetry retention and rollup | **done** | `storage.py::rollup_telemetry`; 1m → 5m → 1h → 1d buckets |
 | 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
 | 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
@@ -150,10 +150,10 @@ what was intended.
 | — | Decision replay (§3.1) | **done** | `the_tower/replay.py`; `POST /replay`, `GET /decisions` |
 | — | Node lifecycle states | **done** | draining / cordoned / maintenance / offline / unknown |
 
-**Still open in Horizon 0:** migration *rollback* (only forward migrations
-exist), a real macOS CPU thermal sensor (the platform exposes none to
-unprivileged processes, so the local node's temperature is a labelled
-estimate), and the `simplify` pass over `core.py`.
+**Still open in Horizon 0:** a real macOS CPU thermal sensor (the platform
+exposes none to unprivileged processes, so the local node's temperature is a
+labelled estimate), and rolling the `simplify` pass further into
+`core.py`.
 
 ---
 

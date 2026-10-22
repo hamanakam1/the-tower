@@ -166,6 +166,25 @@ MIGRATIONS = [
     ]),
 ]
 
+# The reverse of each migration, applied newest-first when rolling back.
+# A migration without a rollback is irreversible: it must say so.
+ROLLBACKS = {
+    2: [
+        "ALTER TABLE flights DROP COLUMN scope_json",
+        "ALTER TABLE flights DROP COLUMN retries",
+        "ALTER TABLE flights DROP COLUMN max_retries",
+    ],
+    3: ["DROP TABLE IF EXISTS containers"],
+    4: [
+        "ALTER TABLE telemetry DROP COLUMN source",
+        "ALTER TABLE telemetry DROP COLUMN source_note",
+    ],
+    5: [
+        "DROP INDEX IF EXISTS idx_rollup_node",
+        "DROP TABLE IF EXISTS telemetry_rollup",
+    ],
+}
+
 
 def _table_columns(conn: sqlite3.Connection, table: str):
     try:
@@ -233,6 +252,36 @@ class Storage:
         with self._lock:
             row = self.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
             return row[0] or 0
+
+    def rollback_migration(self, version: Optional[int] = None) -> int:
+        """Roll the schema back to `version` (or one step, if None).
+
+        Returns the number of migrations rolled back. A migration without a
+        registered rollback is refused rather than half-applied.
+        """
+        with self._lock:
+            current = self.schema_version()
+            target = current - 1 if version is None else version
+            if target >= current:
+                return 0
+            applied = 0
+            for v in range(current, target, -1):
+                statements = ROLLBACKS.get(v)
+                if statements is None:
+                    raise RuntimeError(
+                        f"migration {v} has no rollback; refusing to roll back partially")
+                for stmt in statements:
+                    try:
+                        self.conn.execute(stmt)
+                    except sqlite3.OperationalError as e:
+                        if "no such column" in str(e).lower() or \
+                           "no such table" in str(e).lower():
+                            continue
+                        raise
+                self.conn.execute("DELETE FROM schema_version WHERE version=?", (v,))
+                self.conn.commit()
+                applied += 1
+            return applied
 
     # ---- flights ----
     @_serialised

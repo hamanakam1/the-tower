@@ -56,6 +56,35 @@ def test_migrations_are_recorded_and_idempotent(tmp_path):
     s.close()
 
 
+def test_migration_rollback(tmp_path):
+    s = Storage(str(tmp_path / "rb.sqlite"))
+    top = s.schema_version()
+    assert top >= 3
+    rolled = s.rollback_migration(top - 1)
+    assert rolled == 1
+    assert s.schema_version() == top - 1
+    # the rolled-back table is gone
+    with pytest.raises(Exception):
+        s.conn.execute("SELECT * FROM telemetry_rollup LIMIT 1").fetchall()
+    s.close()
+
+
+def test_rollback_refuses_an_irreversible_migration(tmp_path):
+    s = Storage(str(tmp_path / "rb2.sqlite"))
+    with pytest.raises(RuntimeError):
+        s.rollback_migration(0)
+    s.close()
+
+
+def test_rollback_then_forward_again(tmp_path):
+    s = Storage(str(tmp_path / "rb3.sqlite"))
+    top = s.schema_version()
+    s.rollback_migration(top - 1)
+    assert s.apply_migrations() == 1
+    assert s.schema_version() == top
+    s.close()
+
+
 def test_flights_persist_scope_and_retries(tmp_path):
     from the_tower.schemas import Flight, ResourceWeight
 
