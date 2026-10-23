@@ -105,7 +105,7 @@ class Tower:
         if self.storage is not None:
             for f in await self._store(self.storage.load_flights) or []:
                 self.flights[f.id] = f
-                if f.status == FlightStatus.IN_FLIGHT:
+                if f.status in (FlightStatus.IN_FLIGHT, FlightStatus.DRAINING):
                     self._index_scope(f)
                 elif f.status == FlightStatus.QUEUED:
                     self._queued_ids.add(f.id)
@@ -295,6 +295,14 @@ class Tower:
                                message=f"{flight.callsign} drained and landed on {flight.assigned_node}",
                                severity="info")
                 elif flight.drain_until and now >= flight.drain_until:
+                    if flight.container_id:
+                        # Use the same ownership and audit path as an immediate
+                        # kill; closing only the flight record leaves work alive.
+                        await self.kill(KillRequest(
+                            container_id=flight.container_id,
+                            reason="drain deadline expired", requester="tower",
+                            drain_first=False))
+                        continue
                     flight.status = FlightStatus.SHOT_DOWN
                     flight.shot_down_at = now
                     flight.reason = "drain deadline expired - terminated"
@@ -400,7 +408,7 @@ class Tower:
             ))
         in_flight: List[ScopeView] = []
         for f in self.flights.values():
-            if f.status == FlightStatus.IN_FLIGHT and f.scope:
+            if f.status in (FlightStatus.IN_FLIGHT, FlightStatus.DRAINING) and f.scope:
                 in_flight.append(ScopeView(
                     flight_id=f.id, callsign=f.callsign, scope=list(f.scope),
                     priority=int(f.priority), node_id=f.assigned_node,
@@ -432,7 +440,13 @@ class Tower:
                 return await self._act_shot_down(flight, decision, "rogue flight declared")
 
             if decision.preempt_flight_id:
-                await self._act_preempt(flight, decision)
+                if await self._act_preempt(flight, decision):
+                    # Releasing a scope is not sufficient for clearance.
+                    # Recheck remaining conflicts and actual node capacity,
+                    # and record the snapshot that made the final decision.
+                    snap = self.snapshot()
+                    decision = decide(flight, snap)
+                    self._last_decision = decision
 
             if decision.decision == ClearanceDecision.QUEUED:
                 return await self._act_queued(flight, decision, snap)
@@ -497,17 +511,19 @@ class Tower:
                                 assigned_node=node_id or decision.assigned_node,
                                 reason=flight.reason, admission=decision.to_dict())
 
-    async def _act_preempt(self, flight: Flight, decision: Decision):
+    async def _act_preempt(self, flight: Flight, decision: Decision) -> bool:
         """Preempt the incumbent, or recommend it if the node is advisory."""
         existing = self.flights.get(decision.preempt_flight_id)
+        if existing is None or existing.status != FlightStatus.IN_FLIGHT:
+            return False
         target_node = self.nodes.get(existing.assigned_node) if existing else None
-        enforcing = (target_node.spec.enforcement == "enforce") if target_node else True
+        enforcing = target_node is not None and target_node.spec.enforcement == "enforce"
         if enforcing:
             await self._preempt(decision.preempt_flight_id,
                                 f"preempted by {flight.callsign} (higher priority)")
-            return
+            return True
         # advisory mode: the Tower recommends, and records, but does not act
-        self._emit(EventKind.ANOMALY, node_id=decision.preempt_flight_id, flight_id=flight.id,
+        self._emit(EventKind.ANOMALY, node_id=existing.assigned_node, flight_id=flight.id,
                    message=(f"ADVISORY: would preempt {existing.callsign if existing else decision.preempt_flight_id} "
                             f"for {flight.callsign} - node is advisory-only"),
                    severity="warn",
@@ -516,6 +532,7 @@ class Tower:
             "kind": "preempt_recommendation", "flight_id": flight.id,
             "target": decision.preempt_flight_id, "enforcement": "advisory",
         })
+        return False
 
     async def _act_queued(self, flight: Flight, decision: Decision,
                           snapshot: Optional[MeshSnapshot] = None) -> ClearanceResponse:
@@ -683,9 +700,13 @@ class Tower:
             # it is terminated. Without one, the kill is immediate.
             draining = False
             if (flight and req.drain_timeout_s > 0
-                    and flight.status in (FlightStatus.IN_FLIGHT, FlightStatus.CLEARED)):
+                    and flight.status in (FlightStatus.IN_FLIGHT, FlightStatus.CLEARED,
+                                          FlightStatus.DRAINING)):
+                # A retry must neither shorten the grace period to zero nor
+                # extend it indefinitely. Preserve the first drain deadline.
+                if flight.status != FlightStatus.DRAINING or flight.drain_until is None:
+                    flight.drain_until = datetime.now(timezone.utc) + timedelta(seconds=req.drain_timeout_s)
                 flight.status = FlightStatus.DRAINING
-                flight.drain_until = datetime.now(timezone.utc) + timedelta(seconds=req.drain_timeout_s)
                 flight.reason = f"draining for {req.drain_timeout_s:.0f}s: {req.reason}"
                 draining = True
                 if self.storage is not None:
@@ -700,7 +721,8 @@ class Tower:
                                             "node_id": node_id, "timeout_s": req.drain_timeout_s,
                                             "reason": req.reason})
             elif flight:
-                if flight.status in (FlightStatus.IN_FLIGHT, FlightStatus.CLEARED, FlightStatus.QUEUED):
+                if flight.status in (FlightStatus.IN_FLIGHT, FlightStatus.CLEARED,
+                                     FlightStatus.QUEUED, FlightStatus.DRAINING):
                     flight.status = FlightStatus.SHOT_DOWN
                     self._queued_ids.discard(flight.id)
                     flight.shot_down_at = datetime.now(timezone.utc)
@@ -722,7 +744,7 @@ class Tower:
             # looks like a PID is not a licence to kill that process.
             killed_proc = False
             pid = self._owned_pid_for(req.container_id)
-            if pid is not None:
+            if pid is not None and not draining:
                 try:
                     import os, signal
                     os.kill(pid, signal.SIGKILL)
@@ -963,7 +985,7 @@ class Tower:
 
     # ---------------- conflict detection ----------------
     def scope_conflict(self, flight: Flight) -> Optional[str]:
-        """Return the id of an in-flight flight that shares a scope key.
+        """Return the id of a running or draining flight sharing a scope key.
 
         Uses the scope index rather than scanning every flight, so the cost
         is proportional to the number of *conflicting* flights, not to the
@@ -976,7 +998,7 @@ class Tower:
                 f = self.flights.get(fid)
                 if f is None:
                     continue
-                if f.status != FlightStatus.IN_FLIGHT:
+                if f.status not in (FlightStatus.IN_FLIGHT, FlightStatus.DRAINING):
                     continue
                 if set(f.scope) & set(flight.scope):
                     return fid
@@ -1006,6 +1028,7 @@ class Tower:
             node.active_flights = [x for x in node.active_flights if x != flight_id]
             node.active_weights.pop(flight_id, None)
         self._deindex_scope(f)
+        self._release_lease_for(flight_id)
         if self.storage is not None:
             await self._store(self.storage.upsert_flight, f)
         self._emit(EventKind.SHOT_DOWN, node_id=f.assigned_node, flight_id=flight_id,

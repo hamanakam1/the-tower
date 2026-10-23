@@ -5,6 +5,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, HTMLResponse, FileResponse
 from starlette.routing import Route, WebSocketRoute
@@ -272,20 +273,17 @@ class TowerServer:
             return JSONResponse(result)
 
         async def kill(request):
-            body = {}
             try:
                 body = await request.json()
-            except Exception:
-                body = {}
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse({"error": "valid JSON object required"}, status_code=400)
+            if not isinstance(body, dict):
+                return JSONResponse({"error": "JSON object required"}, status_code=400)
             container_id = request.path_params["container_id"]
-            req = KillRequest(
-                container_id=container_id,
-                reason=body.get("reason", "manual kill"),
-                requester=body.get("requester", "operator"),
-                force=bool(body.get("force", False)),
-                drain_first=bool(body.get("drain_first", True)),
-                drain_timeout_s=float(body.get("drain_timeout_s", 0) or 0),
-            )
+            try:
+                req = KillRequest(**{**body, "container_id": container_id})
+            except ValidationError:
+                return JSONResponse({"error": "invalid kill request"}, status_code=400)
             resp = await tower.kill(req)
             return JSONResponse(resp.model_dump(mode="json"))
 
@@ -391,7 +389,8 @@ class TowerServer:
             conflicting = []
             from the_tower.schemas import FlightStatus
             for fid, f in tower.flights.items():
-                if f.status == FlightStatus.IN_FLIGHT and set(f.scope) & set(scope):
+                if (f.status in (FlightStatus.IN_FLIGHT, FlightStatus.DRAINING)
+                        and set(f.scope) & set(scope)):
                     conflicting.append(fid)
             return JSONResponse({"conflicting_flights": conflicting})
 

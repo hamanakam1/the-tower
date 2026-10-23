@@ -27,7 +27,7 @@ from .schemas import (
 
 # Bumped when the admission rules change. Recorded with every decision so a
 # decision made by an older Tower can be told apart from a newer one.
-POLICY_VERSION = "p-2026.10.1"
+POLICY_VERSION = "p-2026.10.2"
 
 
 # ============================================================================
@@ -196,15 +196,18 @@ def decide(flight: Flight, snapshot: MeshSnapshot) -> Decision:
             reason="rogue flight declared - shot down on approach",
         )
 
-    # 2. Scope conflict. A strictly higher priority flight preempts the
-    #    incumbent; otherwise the request waits its turn.
+    # 2. Scope conflict. A strictly higher priority flight may preempt the
+    #    incumbent. This is an intent, not clearance: the engine must apply
+    #    the incumbent's enforcement policy and decide again after release.
     conflict = snapshot.scope_conflict(flight)
     if conflict is not None:
         if int(flight.priority) < int(conflict.priority):
             return Decision(
-                decision=ClearanceDecision.CLEARED,
-                reason=(f"scope free after preempting {conflict.callsign} "
+                decision=ClearanceDecision.QUEUED,
+                reason=(f"scope requires preempting {conflict.callsign} "
                         f"(higher priority: P{int(flight.priority)} < P{conflict.priority})"),
+                assigned_node=conflict.assigned_node,
+                estimated_wait_s=30.0,
                 scope_conflict=conflict.flight_id,
                 preempt_flight_id=conflict.flight_id,
             )

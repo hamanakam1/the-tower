@@ -335,16 +335,16 @@ class LeaseRequest(BaseModel):
 
 
 class KillRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     container_id: str
-    reason: str = "manual kill"
+    reason: str = ""
     requester: str = "operator"
-    force: bool = False
-    drain_first: bool = Field(default=True,
+    force: bool = Field(default=False, strict=True)
+    drain_first: bool = Field(default=True, strict=True,
                               description="Stop admitting to the node before killing")
-    drain_timeout_s: float = Field(default=0.0, ge=0.0,
-                                   description="Seconds to wait for in-flight work to land")
+    drain_timeout_s: float = Field(default=0.0, ge=0.0, le=86400.0,
+                                   description="Seconds to wait for in-flight work to land (up to 24 hours)")
 
 
 class KillResponse(BaseModel):

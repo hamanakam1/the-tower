@@ -107,7 +107,8 @@ def test_scope_conflict_preempts_lower_priority():
     flight = Flight(task="x", scope=["res"], priority=FlightPriority.P0,
                     weight=ResourceWeight(cpu_cores=1, memory_gb=1))
     d = decide(flight, snap)
-    assert d.decision == ClearanceDecision.CLEARED
+    # Preemption remains an intent until enforcement and capacity are checked.
+    assert d.decision == ClearanceDecision.QUEUED
     assert d.preempt_flight_id == "f1"
 
 

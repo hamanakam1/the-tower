@@ -167,8 +167,8 @@
       <h3>Anti-Air Battery</h3>
       <div class="controls">
         <input id="killTarget" placeholder="Container ID to stop" />
-        <input id="killReason" placeholder="Reason" value="manual kill" />
-        <input id="killDrain" placeholder="Grace seconds before it is stopped (0 = immediate)" value="0" />
+        <input id="killReason" placeholder="Reason (required)" required />
+        <input id="killDrain" type="number" min="0" max="86400" step="any" placeholder="Grace seconds before it is stopped (0 = immediate)" value="0" />
         <button class="kill" onclick="doKill()">FIRE</button>
         <div style="font-size:10px;color:var(--muted);">The Tower only stops processes it was given ownership of. A grace period lets the flight land first.</div>
       </div>
@@ -390,8 +390,15 @@ async function requestClearance() {
 async function doKill() {
   const target = document.getElementById("killTarget").value.trim();
   if (!target) return;
-  const reason = document.getElementById("killReason").value.trim() || "manual kill";
-  const drain = parseFloat(document.getElementById("killDrain").value) || 0;
+  const reasonInput = document.getElementById("killReason");
+  const reason = reasonInput.value.trim();
+  reasonInput.setCustomValidity(reason ? "" : "Enter a reason before stopping a flight.");
+  if (!reasonInput.reportValidity()) return;
+  const drainInput = document.getElementById("killDrain");
+  const drain = Number(drainInput.value);
+  drainInput.setCustomValidity(Number.isFinite(drain) && drain >= 0 && drain <= 86400
+    ? "" : "Enter a grace period from 0 to 86400 seconds.");
+  if (!drainInput.reportValidity()) return;
   const r = await fetchJSON(`/kill/${encodeURIComponent(target)}`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({reason, drain_timeout_s: drain}) });
   console.log(r);
   if (r && r.message) console.log(r.message);

@@ -45,6 +45,12 @@
 - 101 tests, up from 31
 
 ## Unreleased
+- Reject malformed kill commands before mutation, require an explicit reason,
+  and validate boolean flags and finite drain grace periods of up to 24 hours.
+- Keep owned processes alive during a drain grace period and terminate them
+  through the normal ownership/audit path when the deadline expires.
+- Recheck node capacity and remaining scopes after enforced preemption, release
+  the incumbent lease, and keep advisory or draining scope owners protected.
 - Fix audit id collision: `audit-<epoch-ms>` raised `UNIQUE constraint failed` on two entries in the same millisecond; now `audit-<epoch-ns>`
 - Fix audit chain ordering: second-resolution timestamps were ambiguous; the chain now follows insertion order
 - Fix storage thread affinity: the SQLite connection was bound to the constructing thread and raised `ProgrammingError` on any write from another thread; the connection is now shared under a lock

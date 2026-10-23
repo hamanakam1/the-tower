@@ -184,6 +184,25 @@ volume. See the [package on GitHub](https://github.com/hamanakam1/the-tower/pkgs
 - `GET /decisions` - Recorded clearance decisions
 - `POST /replay` - Re-derive a decision from its recorded snapshot
 
+## Kill request guardrails
+
+`POST /kill/:container` accepts a JSON object with an explicit, nonblank
+`reason`. An omitted or blank reason returns `success: false` and leaves the
+flight running. Malformed JSON, unknown fields, invalid types, and drain
+timeouts outside 0–86400 seconds return HTTP 400 before any target changes.
+`force` and `drain_first`, when supplied, must be JSON booleans.
+
+A positive `drain_timeout_s` leaves an owned process running during its grace
+period. If the flight has not landed when that deadline is reached, the Tower
+uses the same ownership checks and audit path as an immediate kill. A zero
+timeout requests an immediate kill. The dashboard requires a reason too.
+
+Scope preemption is a queued intent until the incumbent's enforcement policy
+allows it. After releasing an enforced incumbent, the Tower checks remaining
+scope conflicts and node capacity again. A cleared replacement receives a
+node and lease; advisory incumbents keep their claims and challengers wait.
+Draining flights retain their scopes throughout their grace period.
+
 ## Adding a real node
 
 One command, run on the machine that joins the mesh:
