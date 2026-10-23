@@ -45,6 +45,15 @@
 - 101 tests, up from 31
 
 ## Unreleased
+
+- Restore active and draining reservations, queued node membership, and durable
+  leases on restart. Migration 7 adds lease storage with a rollback; paired
+  flight/lease transitions are atomic and unreadable admission state aborts startup.
+- Preserve drain resource claims through lease expiry, reject expired lease
+  renewals, and keep obsolete leases from evicting newer attempts.
+- Serialize concurrent v2 idempotency requests within one server instance;
+  reject malformed inputs with HTTP 400 and incomplete persisted answers with
+  HTTP 409 instead of admitting duplicate work.
 - Reject malformed kill commands before mutation, require an explicit reason,
   and validate boolean flags and finite drain grace periods of up to 24 hours.
 - Keep owned processes alive during a drain grace period and terminate them

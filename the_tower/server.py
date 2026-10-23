@@ -18,7 +18,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .core import Tower
 from .replay import replay, compare, snapshot_to_dict, snapshot_from_dict
 from .schemas import (
-    ClearanceRequest, Flight, KillRequest, Telemetry, AirspaceSnapshot,
+    ClearanceRequest, ClearanceResponse, Flight, KillRequest, Telemetry, AirspaceSnapshot,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -40,6 +40,9 @@ def _container_json(info):
 class TowerServer:
     def __init__(self, tower: Tower):
         self.tower = tower
+        # The core admission lock ends before the v2 answer is persisted.
+        # Serialize lookup through response storage within this server too.
+        self._clearance_v2_lock = asyncio.Lock()
         self.app = self._build()
 
     def _build(self) -> Starlette:
@@ -160,44 +163,74 @@ class TowerServer:
 
         async def clearance_v2(request):
             """Clearance contract v2: idempotent, explainable, 202 on accept."""
-            body = await request.json()
+            try:
+                body = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse({"error": "valid JSON object required"}, status_code=400)
+            if not isinstance(body, dict):
+                return JSONResponse({"error": "JSON object required"}, status_code=400)
             key = body.get("idempotency_key")
-            if key:
-                cached = tower.idempotent_result(key)
-                if cached is not None:
-                    return JSONResponse(cached, status_code=200)
-                # The in-memory cache does not survive a restart. The key is
-                # stored on the flight, which is persisted, so a retry after a
-                # restart still gets the original answer instead of a second
-                # flight.
-                existing = tower.flight_by_idempotency_key(key)
-                if existing is not None:
-                    stored = (existing.metadata or {}).get("idempotency_response")
-                    if stored:
-                        tower.remember_idempotent(key, stored)
-                        return JSONResponse(stored, status_code=200)
-            from .schemas import Flight, ResourceWeight, FlightPriority
-            constraints = body.get("constraints") or {}
-            flight = Flight(
-                task=body.get("task", "unnamed task"),
-                requester=body.get("requester", "el-hidratador"),
-                priority=FlightPriority(body.get("priority", 2)),
-                weight=ResourceWeight(**(body.get("weight") or {})),
-                container_id=body.get("container_id"),
-                preferred_node=constraints.get("preferred_node"),
-                scope=body.get("scope", []),
-                metadata={"idempotency_key": key} if key else {},
-            )
-            resp = await tower.request_clearance(ClearanceRequest(flight=flight))
-            payload = resp.model_dump(mode="json")
-            if key:
-                payload = dict(payload)
-                payload["idempotency_key"] = key
-                flight.metadata = {**flight.metadata, "idempotency_response": payload}
-                tower.remember_idempotent(key, payload)
-                await tower.persist_flight(flight)
-            status = 202 if resp.decision.value == "cleared" else 200
-            return JSONResponse(payload, status_code=status)
+            if "idempotency_key" in body and (not isinstance(key, str) or not key.strip()):
+                return JSONResponse(
+                    {"error": "idempotency_key must be a nonblank string"}, status_code=400)
+            constraints = body.get("constraints")
+            weight = body.get("weight")
+            if ((constraints is not None and not isinstance(constraints, dict))
+                    or (weight is not None and not isinstance(weight, dict))):
+                return JSONResponse({"error": "invalid clearance request"}, status_code=400)
+
+            async with self._clearance_v2_lock:
+                if key:
+                    cached = tower.idempotent_result(key)
+                    if cached is not None:
+                        return JSONResponse(cached, status_code=200)
+                    # Persisted keys survive cache eviction and restarts. A
+                    # key without its original answer may have been admitted
+                    # before an interruption: never schedule it a second time.
+                    existing = tower.flight_by_idempotency_key(key)
+                    if existing is not None:
+                        stored = (existing.metadata or {}).get("idempotency_response")
+                        if (isinstance(stored, dict)
+                                and stored.get("flight_id") == existing.id
+                                and stored.get("idempotency_key") == key):
+                            try:
+                                ClearanceResponse.model_validate({
+                                    k: v for k, v in stored.items() if k != "idempotency_key"
+                                })
+                            except ValidationError:
+                                pass
+                            else:
+                                tower.remember_idempotent(key, stored)
+                                return JSONResponse(stored, status_code=200)
+                        return JSONResponse({
+                            "error": "original clearance response is incomplete; duplicate admission refused",
+                            "flight_id": existing.id,
+                            "idempotency_key": key,
+                        }, status_code=409)
+                from .schemas import Flight, ResourceWeight, FlightPriority
+                try:
+                    flight = Flight(
+                        task=body.get("task", "unnamed task"),
+                        requester=body.get("requester", "el-hidratador"),
+                        priority=FlightPriority(body.get("priority", 2)),
+                        weight=ResourceWeight(**(weight or {})),
+                        container_id=body.get("container_id"),
+                        preferred_node=(constraints or {}).get("preferred_node"),
+                        scope=body.get("scope", []),
+                        metadata={"idempotency_key": key} if key else {},
+                    )
+                except (ValidationError, ValueError, TypeError):
+                    return JSONResponse({"error": "invalid clearance request"}, status_code=400)
+                resp = await tower.request_clearance(ClearanceRequest(flight=flight))
+                payload = resp.model_dump(mode="json")
+                if key:
+                    payload = dict(payload)
+                    payload["idempotency_key"] = key
+                    flight.metadata = {**flight.metadata, "idempotency_response": payload}
+                    await tower.persist_flight(flight)
+                    tower.remember_idempotent(key, payload)
+                status = 202 if resp.decision.value == "cleared" else 200
+                return JSONResponse(payload, status_code=status)
 
         async def last_decision(request):
             d = tower._last_decision

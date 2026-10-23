@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .schemas import Flight, TowerEvent, Telemetry
+from .schemas import Flight, Lease, TowerEvent, Telemetry
 
 
 def _serialised(fn):
@@ -168,6 +168,10 @@ MIGRATIONS = [
     (6, "flight drain deadline", [
         "ALTER TABLE flights ADD COLUMN drain_until TEXT",
     ]),
+    # v7 — leases retain their absolute deadlines and renewal history.
+    (7, "durable resource leases", [
+        "CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, lease_json TEXT NOT NULL)",
+    ]),
 ]
 
 # The reverse of each migration, applied newest-first when rolling back.
@@ -190,6 +194,7 @@ ROLLBACKS = {
     6: [
         "ALTER TABLE flights DROP COLUMN drain_until",
     ],
+    7: ["DROP TABLE IF EXISTS leases"],
 }
 
 
@@ -292,40 +297,42 @@ class Storage:
 
     # ---- flights ----
     @_serialised
-    def upsert_flight(self, f: Flight):
+    def upsert_flight(self, f: Flight, lease: Optional[Lease] = None):
         # Named columns (not positional) so migrations can add columns
         # without breaking this statement.
-        self.conn.execute(
-            """INSERT INTO flights
-               (id, callsign, task, requester, priority, weight_json, container_id,
-                preferred_node, status, submitted_at, cleared_at, takeoff_at, landed_at,
-                shot_down_at, assigned_node, reason, rogue, metadata_json, scope_json,
-                retries, max_retries, drain_until)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(id) DO UPDATE SET
-               callsign=excluded.callsign, task=excluded.task, requester=excluded.requester,
-               priority=excluded.priority, weight_json=excluded.weight_json,
-               container_id=excluded.container_id, preferred_node=excluded.preferred_node,
-               status=excluded.status, submitted_at=excluded.submitted_at,
-               cleared_at=excluded.cleared_at, takeoff_at=excluded.takeoff_at,
-               landed_at=excluded.landed_at, shot_down_at=excluded.shot_down_at,
-               assigned_node=excluded.assigned_node, reason=excluded.reason,
-               rogue=excluded.rogue, metadata_json=excluded.metadata_json,
-               scope_json=excluded.scope_json, retries=excluded.retries,
-               max_retries=excluded.max_retries, drain_until=excluded.drain_until""",
-            (
-                f.id, f.callsign, f.task, f.requester, int(f.priority), f.weight.model_dump_json(),
-                f.container_id, f.preferred_node, f.status.value,
-                f.submitted_at.isoformat(), f.cleared_at.isoformat() if f.cleared_at else None,
-                f.takeoff_at.isoformat() if f.takeoff_at else None,
-                f.landed_at.isoformat() if f.landed_at else None,
-                f.shot_down_at.isoformat() if f.shot_down_at else None,
-                f.assigned_node, f.reason, 1 if f.rogue else 0, json.dumps(f.metadata),
-                json.dumps(f.scope), f.retries, f.max_retries,
-                f.drain_until.isoformat() if f.drain_until else None,
-            ),
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO flights
+                   (id, callsign, task, requester, priority, weight_json, container_id,
+                    preferred_node, status, submitted_at, cleared_at, takeoff_at, landed_at,
+                    shot_down_at, assigned_node, reason, rogue, metadata_json, scope_json,
+                    retries, max_retries, drain_until)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                   callsign=excluded.callsign, task=excluded.task, requester=excluded.requester,
+                   priority=excluded.priority, weight_json=excluded.weight_json,
+                   container_id=excluded.container_id, preferred_node=excluded.preferred_node,
+                   status=excluded.status, submitted_at=excluded.submitted_at,
+                   cleared_at=excluded.cleared_at, takeoff_at=excluded.takeoff_at,
+                   landed_at=excluded.landed_at, shot_down_at=excluded.shot_down_at,
+                   assigned_node=excluded.assigned_node, reason=excluded.reason,
+                   rogue=excluded.rogue, metadata_json=excluded.metadata_json,
+                   scope_json=excluded.scope_json, retries=excluded.retries,
+                   max_retries=excluded.max_retries, drain_until=excluded.drain_until""",
+                (
+                    f.id, f.callsign, f.task, f.requester, int(f.priority), f.weight.model_dump_json(),
+                    f.container_id, f.preferred_node, f.status.value,
+                    f.submitted_at.isoformat(), f.cleared_at.isoformat() if f.cleared_at else None,
+                    f.takeoff_at.isoformat() if f.takeoff_at else None,
+                    f.landed_at.isoformat() if f.landed_at else None,
+                    f.shot_down_at.isoformat() if f.shot_down_at else None,
+                    f.assigned_node, f.reason, 1 if f.rogue else 0, json.dumps(f.metadata),
+                    json.dumps(f.scope), f.retries, f.max_retries,
+                    f.drain_until.isoformat() if f.drain_until else None,
+                ),
+            )
+            if lease is not None:
+                self._write_lease(lease)
         # audit trail: record every flight state transition in the hash chain
         try:
             self.append_audit({
@@ -377,6 +384,24 @@ class Storage:
     def delete_flight(self, flight_id: str):
         self.conn.execute("DELETE FROM flights WHERE id=?", (flight_id,))
         self.conn.commit()
+
+    # ---- leases ----
+    def _write_lease(self, lease: Lease):
+        self.conn.execute(
+            "INSERT INTO leases (id, lease_json) VALUES (?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET lease_json=excluded.lease_json",
+            (lease.id, lease.model_dump_json()),
+        )
+
+    @_serialised
+    def upsert_lease(self, lease: Lease):
+        with self.conn:
+            self._write_lease(lease)
+
+    @_serialised
+    def load_leases(self) -> List[Lease]:
+        return [Lease.model_validate_json(row["lease_json"])
+                for row in self.conn.execute("SELECT lease_json FROM leases").fetchall()]
 
     # ---- events ----
     @_serialised

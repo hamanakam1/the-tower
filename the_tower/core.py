@@ -103,12 +103,24 @@ class Tower:
         self._started_at = time.time()
         # load persisted state
         if self.storage is not None:
-            for f in await self._store(self.storage.load_flights) or []:
+            # These reads are admission-critical: a failed recovery must not
+            # silently turn an occupied node into an empty one.
+            flights = await asyncio.to_thread(self.storage.load_flights)
+            leases = await asyncio.to_thread(self.storage.load_leases)
+            self.leases.update({lease.id: lease for lease in leases})
+            for f in flights:
                 self.flights[f.id] = f
+                node = self.nodes.get(f.assigned_node)
                 if f.status in (FlightStatus.IN_FLIGHT, FlightStatus.DRAINING):
                     self._index_scope(f)
+                    if node is not None:
+                        if f.id not in node.active_flights:
+                            node.active_flights.append(f.id)
+                        node.active_weights[f.id] = f.weight
                 elif f.status == FlightStatus.QUEUED:
                     self._queued_ids.add(f.id)
+                    if node is not None and f.id not in node.queued_flights:
+                        node.queued_flights.append(f.id)
             for e in await self._store(self.storage.load_events) or []:
                 self.events.append(e)
             for nid, node in self.nodes.items():
@@ -247,7 +259,7 @@ class Tower:
                     flight.shot_down_at = datetime.now(timezone.utc)
                     flight.reason = "auto-kill: node redline breach (max retries)"
                 if self.storage is not None:
-                    await self._store(self.storage.upsert_flight, flight)
+                    await self.persist_flight(flight)
                 self._emit(EventKind.SHOT_DOWN, node_id=node_id, flight_id=fid,
                            message=f"SHOT DOWN {flight.callsign} on {node.spec.name}: redline breach",
                            severity="critical", data={"auto": True})
@@ -270,7 +282,7 @@ class Tower:
                     self._deindex_scope(flight)
                     self._release_lease_for(fid)
                     if self.storage is not None:
-                        await self._store(self.storage.upsert_flight, flight)
+                        await self.persist_flight(flight)
                     self._emit(EventKind.LANDING, node_id=flight.assigned_node, flight_id=fid,
                                message=f"{flight.callsign} landed on {flight.assigned_node}",
                                severity="info")
@@ -290,7 +302,7 @@ class Tower:
                     self._deindex_scope(flight)
                     self._release_lease_for(fid)
                     if self.storage is not None:
-                        await self._store(self.storage.upsert_flight, flight)
+                        await self.persist_flight(flight)
                     self._emit(EventKind.LANDING, node_id=flight.assigned_node, flight_id=fid,
                                message=f"{flight.callsign} drained and landed on {flight.assigned_node}",
                                severity="info")
@@ -314,7 +326,7 @@ class Tower:
                     self._deindex_scope(flight)
                     self._release_lease_for(fid)
                     if self.storage is not None:
-                        await self._store(self.storage.upsert_flight, flight)
+                        await self.persist_flight(flight)
                     self._emit(EventKind.SHOT_DOWN, node_id=flight.assigned_node, flight_id=fid,
                                message=f"SHOT DOWN {flight.callsign}: drain deadline expired",
                                severity="critical",
@@ -370,10 +382,11 @@ class Tower:
         return None
 
     async def persist_flight(self, flight: Flight):
-        """Write a flight to the store."""
+        """Write a flight and its current lease in one transaction."""
         if self.storage is None:
             return
-        await self._store(self.storage.upsert_flight, flight)
+        await self._store(self.storage.upsert_flight, flight,
+                          self.leases.get(flight.metadata.get("lease_id")))
 
     def snapshot(self) -> MeshSnapshot:
         """Freeze the observed world for a pure admission decision."""
@@ -499,7 +512,7 @@ class Tower:
         flight.shot_down_at = datetime.now(timezone.utc)
         flight.reason = why if why != "rogue flight declared" else decision.reason
         if self.storage is not None:
-            await self._store(self.storage.upsert_flight, flight)
+            await self.persist_flight(flight)
         self._emit(EventKind.SHOT_DOWN, node_id=node_id, flight_id=flight.id,
                    message=f"SHOT DOWN: {flight.callsign} - {flight.reason}",
                    severity="critical")
@@ -545,7 +558,7 @@ class Tower:
             if flight.id not in node.queued_flights:
                 node.queued_flights.append(flight.id)
         if self.storage is not None:
-            await self._store(self.storage.upsert_flight, flight)
+            await self.persist_flight(flight)
         self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
                    message=f"Denied/queued: {flight.callsign} - {decision.reason}",
                    severity="warn")
@@ -597,7 +610,7 @@ class Tower:
                 flight.cleared_at = None
                 flight.reason = f"node draining: {assessment.reason}"
                 if self.storage is not None:
-                    await self._store(self.storage.upsert_flight, flight)
+                    await self.persist_flight(flight)
                 return (ClearanceResponse(decision=ClearanceDecision.QUEUED,
                                           flight_id=flight.id,
                                           assigned_node=decision.assigned_node,
@@ -641,7 +654,7 @@ class Tower:
                        severity="info", data={"lease_id": lease.id})
         self._index_scope(flight)
         if self.storage is not None:
-            await self._store(self.storage.upsert_flight, flight)
+            await self.persist_flight(flight)
 
     def _best_eventual_node(self, flight: Flight) -> Optional[str]:
         # node with most free memory among online
@@ -710,7 +723,7 @@ class Tower:
                 flight.reason = f"draining for {req.drain_timeout_s:.0f}s: {req.reason}"
                 draining = True
                 if self.storage is not None:
-                    await self._store(self.storage.upsert_flight, flight)
+                    await self.persist_flight(flight)
                 self._emit(EventKind.ANOMALY, node_id=node_id, flight_id=flight.id,
                            message=(f"Draining {flight.callsign} for {req.drain_timeout_s:.0f}s "
                                     f"before it is terminated"),
@@ -738,7 +751,7 @@ class Tower:
                     self._deindex_scope(flight)
                     self._release_lease_for(flight.id)
                 if flight and self.storage is not None:
-                    await self._store(self.storage.upsert_flight, flight)
+                    await self.persist_flight(flight)
             # Actual process termination. Only a PID the Tower was explicitly
             # given ownership of is ever signalled: a container id that merely
             # looks like a PID is not a licence to kill that process.
@@ -841,13 +854,22 @@ class Tower:
         )
         self.leases[lease.id] = lease
         flight.metadata = {**flight.metadata, "lease_id": lease.id}
+        if self.storage is not None:
+            self.storage.upsert_flight(flight, lease)
         return lease
 
     def renew_lease(self, lease_id: str, ttl_s: Optional[float] = None) -> Optional[Lease]:
         lease = self.leases.get(lease_id)
-        if lease is None or lease.status == LeaseStatus.RELEASED:
+        if lease is None or lease.status != LeaseStatus.ACTIVE or lease.is_expired():
+            return None
+        flight = self.flights.get(lease.flight_id)
+        if (flight is None or flight.status not in (FlightStatus.IN_FLIGHT, FlightStatus.DRAINING)
+                or flight.metadata.get("lease_id") != lease.id
+                or flight.assigned_node != lease.node_id):
             return None
         lease.renew(ttl_s)
+        if self.storage is not None:
+            self.storage.upsert_lease(lease)
         return lease
 
     def release_lease(self, lease_id: str, status: LeaseStatus = LeaseStatus.RELEASED) -> bool:
@@ -855,13 +877,16 @@ class Tower:
         if lease is None:
             return False
         lease.status = status
+        if self.storage is not None:
+            self.storage.upsert_lease(lease)
         return True
 
     def _release_lease_for(self, flight_id: str):
-        for lease in self.leases.values():
-            if lease.flight_id == flight_id and lease.status == LeaseStatus.ACTIVE:
-                lease.status = LeaseStatus.RELEASED
-                return lease
+        flight = self.flights.get(flight_id)
+        lease = self.leases.get(flight.metadata.get("lease_id")) if flight else None
+        if lease is not None and lease.flight_id == flight_id and lease.status == LeaseStatus.ACTIVE:
+            lease.status = LeaseStatus.RELEASED
+            return lease
         return None
 
     def expired_leases(self) -> List[Lease]:
@@ -876,25 +901,48 @@ class Tower:
         """
         reaped = []
         for lease in self.expired_leases():
-            lease.status = LeaseStatus.EXPIRED
+            flight = self.flights.get(lease.flight_id)
+            current = (flight is not None and flight.metadata.get("lease_id") == lease.id
+                       and flight.assigned_node == lease.node_id)
+            # A graceful drain still owns its resources until it lands or the
+            # recorded drain deadline is enforced by _progress_flights.
+            if current and flight.status == FlightStatus.DRAINING:
+                continue
+            next_lease = lease.model_copy(update={"status": LeaseStatus.EXPIRED})
+            next_flight = flight.model_copy(deep=True) if current else None
+            if next_flight is not None and next_flight.status == FlightStatus.IN_FLIGHT:
+                if next_flight.retries < next_flight.max_retries:
+                    next_flight.retries += 1
+                    next_flight.status = FlightStatus.QUEUED
+                    next_flight.assigned_node = None
+                    next_flight.takeoff_at = None
+                    next_flight.cleared_at = None
+                    next_flight.reason = (f"lease expired, rescheduling "
+                                          f"(retry {next_flight.retries}/{next_flight.max_retries})")
+                else:
+                    next_flight.status = FlightStatus.SHOT_DOWN
+                    next_flight.shot_down_at = datetime.now(timezone.utc)
+                    next_flight.reason = "lease expired (max retries)"
+            # Persist the planned transition before freeing anything in memory.
+            # A failed write leaves the original lease eligible for the next sweep.
+            if self.storage is not None:
+                if next_flight is not None:
+                    self.storage.upsert_flight(next_flight, next_lease)
+                else:
+                    self.storage.upsert_lease(next_lease)
+            lease.status = next_lease.status
             node = self.nodes.get(lease.node_id)
-            if node is not None:
+            if current and node is not None:
                 node.active_flights = [f for f in node.active_flights if f != lease.flight_id]
                 node.active_weights.pop(lease.flight_id, None)
-            flight = self.flights.get(lease.flight_id)
-            if flight is not None and flight.status == FlightStatus.IN_FLIGHT:
-                if flight.retries < flight.max_retries:
-                    flight.retries += 1
-                    flight.status = FlightStatus.QUEUED
+            if next_flight is not None and flight.status == FlightStatus.IN_FLIGHT:
+                for field in ("status", "retries", "assigned_node", "takeoff_at", "cleared_at",
+                              "reason", "shot_down_at"):
+                    setattr(flight, field, getattr(next_flight, field))
+                if flight.status == FlightStatus.QUEUED:
                     self._queued_ids.add(flight.id)
-                    flight.assigned_node = None
-                    flight.takeoff_at = None
-                    flight.cleared_at = None
-                    flight.reason = f"lease expired, rescheduling (retry {flight.retries}/{flight.max_retries})"
                 else:
-                    flight.status = FlightStatus.SHOT_DOWN
-                    flight.shot_down_at = datetime.now(timezone.utc)
-                    flight.reason = "lease expired (max retries)"
+                    self._queued_ids.discard(flight.id)
                 self._deindex_scope(flight)
             reaped.append(lease)
             self._emit(EventKind.ANOMALY, node_id=lease.node_id, flight_id=lease.flight_id,
@@ -1030,7 +1078,7 @@ class Tower:
         self._deindex_scope(f)
         self._release_lease_for(flight_id)
         if self.storage is not None:
-            await self._store(self.storage.upsert_flight, f)
+            await self.persist_flight(f)
         self._emit(EventKind.SHOT_DOWN, node_id=f.assigned_node, flight_id=flight_id,
                    message=f"PREEMPTED {f.callsign}: {reason}", severity="critical")
 

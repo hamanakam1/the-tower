@@ -203,6 +203,30 @@ scope conflicts and node capacity again. A cleared replacement receives a
 node and lease; advisory incumbents keep their claims and challengers wait.
 Draining flights retain their scopes throughout their grace period.
 
+## Restart and retry guarantees
+
+With SQLite enabled, startup restores active and draining resource reservations,
+queued flights, and leases with their original absolute expiry and renewal
+history. An unreadable flight or lease store aborts startup before radar or
+dispatch begins. Schema migration 7 adds the lease table; its rollback removes
+that table and retains the flight records.
+
+Flights written before lease persistence was introduced still reserve resources
+after restart. Their unknown lease deadlines are not replaced with a fresh TTL;
+ordinary landing or an explicit stop releases those claims. A draining flight
+keeps its resources until landing or its recorded drain deadline, even if its
+lease expires first. Expired and superseded leases cannot be renewed, and an old
+lease cannot evict the current attempt of a retried flight.
+
+`POST /clearance/v2` serializes concurrent retries inside one server instance.
+An optional `idempotency_key` must be a nonblank string. Successful retries return
+the original response; a persisted key with a missing or invalid response returns
+HTTP 409 with its flight ID instead of admitting the work again. Invalid JSON or
+clearance fields return HTTP 400 before admission. Keys are not coordinated
+across multiple server instances, and restart deduplication requires the initial
+key to have reached SQLite successfully; some existing storage paths log write
+failures without propagating them.
+
 ## Adding a real node
 
 One command, run on the machine that joins the mesh:
