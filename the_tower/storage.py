@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .schemas import Flight, Lease, TowerEvent, Telemetry
+from .schemas import Flight, Lease, NodeStatus, TowerEvent, Telemetry
 
 
 def _serialised(fn):
@@ -172,6 +172,10 @@ MIGRATIONS = [
     (7, "durable resource leases", [
         "CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, lease_json TEXT NOT NULL)",
     ]),
+    # v8 — operator intent survives telemetry updates and spec replacement.
+    (8, "durable node operator states", [
+        "CREATE TABLE IF NOT EXISTS node_states (node_id TEXT PRIMARY KEY, state TEXT NOT NULL)",
+    ]),
 ]
 
 # The reverse of each migration, applied newest-first when rolling back.
@@ -195,6 +199,7 @@ ROLLBACKS = {
         "ALTER TABLE flights DROP COLUMN drain_until",
     ],
     7: ["DROP TABLE IF EXISTS leases"],
+    8: ["DROP TABLE IF EXISTS node_states"],
 }
 
 
@@ -585,6 +590,22 @@ class Storage:
     def load_node_specs(self) -> Dict[str, str]:
         rows = self.conn.execute("SELECT id, spec_json FROM nodes").fetchall()
         return {r["id"]: r["spec_json"] for r in rows}
+
+    @_serialised
+    def upsert_node_state(self, node_id: str, state: NodeStatus):
+        # Store explicit online as well: it distinguishes a deliberate resume
+        # from a legacy node whose drain state has never been recorded.
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO node_states (node_id, state) VALUES (?, ?) "
+                "ON CONFLICT(node_id) DO UPDATE SET state=excluded.state",
+                (node_id, NodeStatus(state).value),
+            )
+
+    @_serialised
+    def load_node_states(self) -> Dict[str, NodeStatus]:
+        return {row["node_id"]: NodeStatus(row["state"])
+                for row in self.conn.execute("SELECT node_id, state FROM node_states").fetchall()}
 
     # ---- audit hash chain ----
     @_serialised

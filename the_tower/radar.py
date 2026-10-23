@@ -52,10 +52,8 @@ class RadarSweep:
                 "simulated" if getattr(node.spec, "simulate", True) else "agent")
             if sampler == "agent":
                 # agent-managed node: never fabricate telemetry, only check
-                # that the agent is still alive
-                age = (datetime.now(timezone.utc) - node.last_seen).total_seconds()
-                if age > node.spec.staleness_budget_s:
-                    node.status = NodeStatus.UNKNOWN
+                # that the agent is still alive without lifting operator holds
+                node.status = self._status_for(node, node.telemetry)
                 out[nid] = node.telemetry
                 continue
             t = self._sample(nid, node, now)
@@ -76,7 +74,15 @@ class RadarSweep:
         return out
 
     def _status_for(self, node: Node, t: Telemetry) -> NodeStatus:
-        if t.thermal_state == ThermalState.CRITICAL:
+        if node.operator_state not in (None, NodeStatus.ONLINE):
+            return node.operator_state
+        if node.spec.sampler == "agent":
+            seen = node.last_seen
+            if seen.tzinfo is None:
+                seen = seen.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - seen).total_seconds() > node.spec.staleness_budget_s:
+                return NodeStatus.UNKNOWN
+        if t.thermal_state == ThermalState.CRITICAL or t.temperature_c >= node.spec.redline_temp_c:
             return NodeStatus.REDLINE
         if t.cpu_percent > 92 or t.memory_percent > 92:
             return NodeStatus.OVERLOADED

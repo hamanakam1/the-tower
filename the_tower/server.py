@@ -371,8 +371,13 @@ class TowerServer:
 
         async def set_node_state(request):
             node_id = request.path_params["node_id"]
-            body = await request.json()
-            state = body.get("state", "online")
+            try:
+                body = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse({"error": "valid JSON object required"}, status_code=400)
+            if not isinstance(body, dict) or not isinstance(body.get("state"), str):
+                return JSONResponse({"error": "explicit node state required"}, status_code=400)
+            state = body["state"]
             ok = tower.set_node_state(node_id, state)
             if not ok:
                 return JSONResponse({"error": "node not found or bad state"}, status_code=400)

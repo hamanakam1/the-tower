@@ -50,7 +50,9 @@ class Tower:
             # build a placeholder telemetry via radar sampling later; create minimal now
             self.nodes[spec.id] = Node(
                 spec=spec,
-                status=NodeStatus.ONLINE,
+                status=NodeStatus.UNKNOWN if spec.sampler == "agent" else NodeStatus.ONLINE,
+                last_seen=(datetime.fromtimestamp(0, timezone.utc) if spec.sampler == "agent"
+                           else datetime.now(timezone.utc)),
                 telemetry=Telemetry(
                     node_id=spec.id,
                     timestamp=datetime.now(timezone.utc),
@@ -107,6 +109,19 @@ class Tower:
             # silently turn an occupied node into an empty one.
             flights = await asyncio.to_thread(self.storage.load_flights)
             leases = await asyncio.to_thread(self.storage.load_leases)
+            states = await asyncio.to_thread(self.storage.load_node_states)
+            # Older databases recorded a draining flight but not its node's
+            # hold. Recover that conservatively, unless an explicit resume
+            # (the online tombstone) or another operator state was recorded.
+            for f in flights:
+                if (f.status == FlightStatus.DRAINING and f.assigned_node in self.nodes
+                        and f.assigned_node not in states):
+                    await asyncio.to_thread(self.storage.upsert_node_state,
+                                            f.assigned_node, NodeStatus.DRAINING)
+                    states[f.assigned_node] = NodeStatus.DRAINING
+            for nid, node in self.nodes.items():
+                node.operator_state = states.get(nid)
+                node.status = self.radar._status_for(node, node.telemetry)
             self.leases.update({lease.id: lease for lease in leases})
             for f in flights:
                 self.flights[f.id] = f
@@ -128,6 +143,8 @@ class Tower:
                 if hist:
                     node.history = hist
                     node.telemetry = hist[-1]
+                    node.last_seen = hist[-1].timestamp
+                    node.status = self.radar._status_for(node, node.telemetry)
             for c in await self._store(self.storage.load_containers) or []:
                 hb = c.get("last_heartbeat")
                 if isinstance(hb, str):
@@ -698,8 +715,9 @@ class Tower:
             # the last thing that happens, not the first.
             if req.drain_first and node_id and node_id in self.nodes:
                 node = self.nodes[node_id]
-                if node.status == NodeStatus.ONLINE and node.active_flights:
-                    node.status = NodeStatus.DRAINING
+                if (node.operator_state in (None, NodeStatus.ONLINE, NodeStatus.DEGRADED,
+                                            NodeStatus.OVERLOADED) and node.active_flights):
+                    self.set_node_state(node_id, NodeStatus.DRAINING.value)
                     self._emit(EventKind.ANOMALY, node_id=node_id,
                                message=(f"Draining {node.spec.name} before kill "
                                         f"({len(node.active_flights)} flight(s) in the air)"),
@@ -809,9 +827,15 @@ class Tower:
     def register_node(self, spec: NodeSpec) -> Node:
         if spec.id in self.nodes:
             return self.nodes[spec.id]
+        state = None
+        if self.storage is not None:
+            state = self.storage.load_node_states().get(spec.id)
         node = Node(
             spec=spec,
-            status=NodeStatus.ONLINE,
+            operator_state=state,
+            status=NodeStatus.UNKNOWN if spec.sampler == "agent" else NodeStatus.ONLINE,
+            last_seen=(datetime.fromtimestamp(0, timezone.utc) if spec.sampler == "agent"
+                       else datetime.now(timezone.utc)),
             telemetry=Telemetry(
                 node_id=spec.id,
                 timestamp=datetime.now(timezone.utc),
@@ -826,6 +850,7 @@ class Tower:
                 thermal_state=ThermalState.NOMINAL,
             ),
         )
+        node.status = self.radar._status_for(node, node.telemetry)
         self.nodes[spec.id] = node
         self.radar.nodes[spec.id] = node
         if self.storage is not None:
@@ -969,21 +994,23 @@ class Tower:
             return False
         try:
             new_status = NodeStatus(state)
-        except ValueError:
+        except (ValueError, TypeError):
             return False
         previous = node.status
-        node.status = new_status
+        # A failed write must not clear a live hold or acknowledge one that
+        # disappears at restart. Specs are independent of operator intent.
         if self.storage is not None:
-            try:
-                self.storage.upsert_node_spec(node_id, node.spec.model_dump_json())
-            except Exception as e:
-                logger.warning("node spec persist failed: %s", e)
+            self.storage.upsert_node_state(node_id, new_status)
+        node.operator_state = new_status
+        node.status = self.radar._status_for(node, node.telemetry)
         self._emit(EventKind.ANOMALY, node_id=node_id,
-                   message=f"Node {node.spec.name}: {previous.value} -> {new_status.value}",
-                   severity="warn" if new_status != NodeStatus.ONLINE else "info",
-                   data={"previous": previous.value, "state": new_status.value})
+                   message=f"Node {node.spec.name}: {previous.value} -> {node.status.value}",
+                   severity="warn" if node.status != NodeStatus.ONLINE else "info",
+                   data={"previous": previous.value, "state": node.status.value,
+                         "requested_state": new_status.value})
         self.log_audit({"kind": "node_state", "node_id": node_id,
-                        "previous": previous.value, "state": new_status.value})
+                        "previous": previous.value, "state": node.status.value,
+                        "requested_state": new_status.value})
         return True
 
     def set_enforcement(self, node_id: str, mode: str) -> bool:

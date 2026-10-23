@@ -227,6 +227,21 @@ across multiple server instances, and restart deduplication requires the initial
 key to have reached SQLite successfully; some existing storage paths log write
 failures without propagating them.
 
+Node lifecycle holds are stored independently of hardware configuration in
+migration 8. Radar sweeps, incoming telemetry, configuration reloads, and restart
+preserve `draining`, `cordoned`, `maintenance`, and `offline` states. A drain
+requested by `kill` with `drain_first: true` also remains a node hold after the
+flight finishes. Resume admission explicitly with
+`POST /nodes/:id/state` and `{"state":"online"}`; missing or malformed state
+bodies cannot resume a node. Resume removes the operator override but still
+respects stale or unsafe telemetry. New agent nodes remain `unknown` until they
+report, and restart retains the timestamp of their last stored sample.
+
+For older databases with a draining flight and no recorded node state, startup
+creates a conservative draining hold. An explicitly recorded `online` request
+takes precedence over this recovery rule. Migration 8 has a rollback for its
+separate `node_states` table; rolling it back discards those operator states.
+
 ## Adding a real node
 
 One command, run on the machine that joins the mesh:

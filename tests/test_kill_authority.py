@@ -4,10 +4,8 @@ land before it kills it.
 These are the two guarantees that make the kill switch safe to point at real
 hardware.
 """
-import asyncio
-import os
-import signal
-import time
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -44,24 +42,19 @@ async def tower(tmp_path):
 
 def _spawn():
     """A child process that will sit still until it is signalled."""
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - the child never returns
-        try:
-            time.sleep(60)
-        finally:
-            os._exit(0)
-    return pid
+    # Launch a fresh interpreter without executing Python between fork and
+    # exec in the multithreaded test runner. Keep the process handle so cleanup
+    # never signals a PID that has already been reaped and potentially reused.
+    return subprocess.Popen(
+        [sys.executable, "-I", "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
 
-def _reap(pid):
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except (ProcessLookupError, OSError):
-        pass
-    try:
-        os.waitpid(pid, 0)
-    except (ChildProcessError, OSError):
-        pass
+def _reap(process):
+    if process.poll() is None:
+        process.kill()
+    process.wait(timeout=5)
 
 
 # --------------------------------------------------------------------------
@@ -74,11 +67,11 @@ async def test_a_numeric_container_id_is_not_treated_as_a_pid(tower):
     used to be SIGKILLed as a process id."""
     victim = _spawn()
     try:
-        tower.register_container(str(victim))
-        resp = await tower.kill(KillRequest(container_id=str(victim), reason="numeric id"))
+        tower.register_container(str(victim.pid))
+        resp = await tower.kill(KillRequest(container_id=str(victim.pid), reason="numeric id"))
         assert resp.process_terminated is False
         # the process is still alive
-        os.kill(victim, 0)
+        assert victim.poll() is None
     finally:
         _reap(victim)
 
@@ -87,9 +80,9 @@ async def test_a_numeric_container_id_is_not_treated_as_a_pid(tower):
 async def test_an_unregistered_pid_is_never_signalled(tower):
     victim = _spawn()
     try:
-        resp = await tower.kill(KillRequest(container_id=str(victim), reason="not registered"))
+        resp = await tower.kill(KillRequest(container_id=str(victim.pid), reason="not registered"))
         assert resp.process_terminated is False
-        os.kill(victim, 0)
+        assert victim.poll() is None
     finally:
         _reap(victim)
 
@@ -97,10 +90,13 @@ async def test_an_unregistered_pid_is_never_signalled(tower):
 @pytest.mark.asyncio
 async def test_a_registered_pid_is_terminated(tower):
     child = _spawn()
-    tower.register_container("c-mine", pid=child)
-    resp = await tower.kill(KillRequest(container_id="c-mine", reason="owned"))
-    assert resp.process_terminated is True
-    os.waitpid(child, 0)
+    try:
+        tower.register_container("c-mine", pid=child.pid)
+        resp = await tower.kill(KillRequest(container_id="c-mine", reason="owned"))
+        assert resp.process_terminated is True
+        child.wait(timeout=5)
+    finally:
+        _reap(child)
 
 
 @pytest.mark.asyncio
@@ -111,15 +107,15 @@ async def test_ownership_survives_a_restart(tmp_path):
         t = Tower(db_path=db)
         await t.start()
         _quiet(t)
-        t.register_container("c-mine", pid=child)
+        t.register_container("c-mine", pid=child.pid)
         await t.stop()
 
         t2 = Tower(db_path=db)
         await t2.start()
-        assert t2.owned_pids().get("c-mine") == child
+        assert t2.owned_pids().get("c-mine") == child.pid
         resp = await t2.kill(KillRequest(container_id="c-mine", reason="after restart"))
         assert resp.process_terminated is True
-        os.waitpid(child, 0)
+        child.wait(timeout=5)
         await t2.stop()
     finally:
         _reap(child)
@@ -137,7 +133,7 @@ async def test_pid_one_is_never_claimed(tower):
 async def test_the_kill_is_audited_with_what_actually_happened(tower):
     child = _spawn()
     try:
-        tower.register_container("c-mine", pid=child)
+        tower.register_container("c-mine", pid=child.pid)
         await tower.kill(KillRequest(container_id="c-mine", reason="owned"))
         assert await tower.verify_audit_async() is True
         rows = tower.storage.conn.execute("SELECT payload_json FROM audit").fetchall()
@@ -178,7 +174,7 @@ async def test_a_draining_flight_lands_when_it_finishes(tower):
     await tower.request_clearance(ClearanceRequest(flight=flight))
     await tower.kill(KillRequest(container_id="c-land", reason="operator", drain_timeout_s=60))
     assert flight.status == FlightStatus.DRAINING
-    await asyncio.sleep(1.2)
+    flight.takeoff_at = datetime.now(timezone.utc) - timedelta(seconds=2)
     await tower._progress_flights()
     assert flight.status == FlightStatus.LANDED
 
@@ -190,7 +186,7 @@ async def test_a_draining_flight_is_terminated_when_the_deadline_passes(tower):
     await tower.request_clearance(ClearanceRequest(flight=flight))
     await tower.kill(KillRequest(container_id="c-hard", reason="operator", drain_timeout_s=1))
     assert flight.status == FlightStatus.DRAINING
-    await asyncio.sleep(1.2)
+    flight.drain_until = datetime.now(timezone.utc) - timedelta(seconds=1)
     await tower._progress_flights()
     assert flight.status == FlightStatus.SHOT_DOWN
     assert "drain deadline expired" in flight.reason

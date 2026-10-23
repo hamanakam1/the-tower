@@ -46,6 +46,12 @@
 
 ## Unreleased
 
+- Preserve operator node holds across telemetry, configuration and restart;
+  migration 8 stores requested states independently of hardware specs. Require
+  an explicit resume request and keep stale or unreported agents unschedulable.
+- Use fresh child interpreters with bounded cleanup in process-ownership tests,
+  and replace wall-clock drain-test sleeps with deterministic timestamps.
+
 - Restore active and draining reservations, queued node membership, and durable
   leases on restart. Migration 7 adds lease storage with a rollback; paired
   flight/lease transitions are atomic and unreadable admission state aborts startup.

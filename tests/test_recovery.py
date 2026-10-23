@@ -273,9 +273,10 @@ def test_lease_migration_round_trip(tmp_path):
     lease = Lease(flight_id="f1", node_id="n1")
     storage.upsert_lease(lease)
     assert storage.load_leases() == [lease]
-    assert storage.schema_version() == 7
-    assert storage.rollback_migration(6) == 1
-    assert storage.apply_migrations() == 1
+    latest = storage.schema_version()
+    assert latest >= 7
+    assert storage.rollback_migration(6) == latest - 6
+    assert storage.apply_migrations() == latest - 6
     assert storage.load_leases() == []
     storage.close()
 

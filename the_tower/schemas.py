@@ -157,6 +157,10 @@ class Node(BaseModel):
 
     spec: NodeSpec
     status: NodeStatus = NodeStatus.ONLINE
+    operator_state: Optional[NodeStatus] = Field(
+        default=None,
+        description="Durable requested state; online releases the operator override",
+    )
     telemetry: Telemetry
     active_flights: List[str] = Field(default_factory=list)
     active_weights: Dict[str, "ResourceWeight"] = Field(default_factory=dict)
