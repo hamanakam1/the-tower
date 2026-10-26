@@ -191,3 +191,55 @@ async def test_tower_audit_endpoint_accepts_rapid_writes(tmp_path):
             assert r.status_code == 200, r.text
         assert client.get("/audit/verify").json() == {"valid": True}
     await t.stop()
+
+
+def test_rollup_coarsens_every_age_band(tmp_path):
+    """Regression: the rollup rolled the oldest rows into 1-minute buckets and
+    deleted them, so 5-minute, hourly and daily buckets were never created and
+    the 1-minute table grew forever."""
+    from datetime import datetime, timezone
+
+    from the_tower.schemas import Telemetry, ThermalState
+
+    s = Storage(str(tmp_path / "rollup.sqlite"))
+    now = time.time()
+    for age in (90.0, 600.0, 7200.0, 3 * 86400.0):
+        s.append_telemetry(Telemetry(
+            node_id="n1", timestamp=datetime.fromtimestamp(now - age, timezone.utc),
+            cpu_percent=20.0, memory_percent=30.0, memory_used_gb=4.0,
+            memory_total_gb=16.0, temperature_c=50.0, power_watts=40.0,
+            bandwidth_mbps=5.0, load_avg=1.0, thermal_state=ThermalState.NOMINAL,
+            source="measured"))
+
+    result = s.rollup_telemetry(now)
+    assert result["rolled"] == 4
+    assert result["deleted"] == 4
+
+    rows = s.load_rollup()
+    assert {r["bucket_seconds"] for r in rows} == {60, 300, 3600, 86400}
+    assert s.conn.execute("SELECT COUNT(*) FROM telemetry").fetchone()[0] == 0
+
+    # Re-running must not double-count or duplicate a bucket.
+    again = s.rollup_telemetry(now)
+    assert again["rolled"] == 0
+    assert len(s.load_rollup()) == 4
+    s.close()
+
+
+def test_rollup_prunes_history_older_than_a_month(tmp_path):
+    from datetime import datetime, timezone
+
+    from the_tower.schemas import Telemetry, ThermalState
+
+    s = Storage(str(tmp_path / "prune.sqlite"))
+    now = time.time()
+    s.append_telemetry(Telemetry(
+        node_id="n1", timestamp=datetime.fromtimestamp(now - 40 * 86400, timezone.utc),
+        cpu_percent=20.0, memory_percent=30.0, memory_used_gb=4.0,
+        memory_total_gb=16.0, temperature_c=50.0, power_watts=40.0,
+        bandwidth_mbps=5.0, load_avg=1.0, thermal_state=ThermalState.NOMINAL))
+    s.rollup_telemetry(now)
+    assert s.load_rollup() == []
+    # the raw row is gone too: nothing may accumulate past the retention limit
+    assert s.conn.execute("SELECT COUNT(*) FROM telemetry").fetchone()[0] == 0
+    s.close()

@@ -112,3 +112,36 @@ def test_the_answer_records_the_key(tmp_path):
         await t.stop()
 
     asyncio.run(run())
+
+
+def test_a_key_whose_answer_was_lost_still_does_not_reschedule(tmp_path):
+    """Regression: the key is persisted before the answer is, so a crash in
+    between left a flight with the key and no stored response. A retry then
+    fell through and scheduled the work a second time."""
+    import asyncio
+
+    from the_tower.schemas import Flight, FlightStatus, ResourceWeight
+
+    async def run():
+        db = str(tmp_path / "tower.sqlite")
+        t = Tower(db_path=db)
+        await t.start()
+        _quiet(t)
+        orphan = Flight(task="answered but not recorded", metadata={"idempotency_key": "key-crash"},
+                        weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=60))
+        orphan.status = FlightStatus.IN_FLIGHT
+        t.flights[orphan.id] = orphan
+        await t.persist_flight(orphan)
+        await t.stop()
+
+        t2 = Tower(db_path=db)
+        await t2.start()
+        app = TowerServer(t2).app
+        with TestClient(app) as client:
+            again = _post(client, "key-crash")
+            assert again.status_code == 200
+            assert again.json()["flight_id"] == orphan.id
+            assert len(t2.flights) == 1
+        await t2.stop()
+
+    asyncio.run(run())

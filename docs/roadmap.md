@@ -158,6 +158,23 @@ reports anything real reports a temperature it guessed.
 - `server.py` — `POST /nodes/:id/enforcement` defaulted a missing `mode` to
   `enforce`. An omitted field now returns 400: switching a node to
   enforcement must be explicit.
+- `storage.py` — the telemetry rollup rolled *everything* older than a minute
+  into 1-minute buckets and then deleted the raw rows, so the 5-minute,
+  hourly and daily bands never saw a sample and never existed, while the
+  1-minute table grew without bound. The age bands are now disjoint, one row
+  per bucket is enforced by a unique index (migration 7), and rolled history
+  older than the retention window is pruned.
+- `server.py` — the v2 idempotency key was persisted before its answer, so a
+  crash in between left a keyed flight with no stored response and the next
+  retry scheduled the work again. A missing answer is now reconstructed from
+  the flight's own state.
+- `core.py` — `DELETE /leases/:id` flipped a lease to released without
+  touching the node's capacity, so the resources of a running flight came
+  back while the work still ran; and an expired lease could be renewed back
+  to life after the sweep had already handed its resources back. A live lease
+  now refuses release (409), and only an active lease can be renewed.
+- `schemas.py` — a lease was emitted as a second `takeoff` event. It has its
+  own `lease` kind now.
 
 > These fixes are in this branch (except the dependency declaration, which
 > landed in the `v0.3.0` tag), with regression tests in
@@ -189,7 +206,7 @@ what was intended.
 | 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
 | 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
 | 0.11 | Bounded rate-limit buckets, CORS allowlist | **done** | `server.py`; `TOWER_CORS_ORIGINS`, no wildcard default |
-| 0.12 | Fill the test gaps | **done** | 161 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability and onboarding |
+| 0.12 | Fill the test gaps | **done** | 170 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability and onboarding |
 | — | Graded safety ladder (§3.2) | **done** | `the_tower/safety.py`: admit → warn → throttle → drain → kill |
 | — | Pure decision core (§3.1) | **done** | `the_tower/policy.py`; the Tower drives it with a frozen snapshot |
 | — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`, advisory by default; the Tower recommends instead of acting |
@@ -214,6 +231,9 @@ Each one has a test.
 | Every clearance decision can be replayed from the Tower's own record | `core.py::replay_flight` | `tests/test_replayability.py` |
 | A fresh Tower advises; it never kills or preempts without an explicit opt-in | `schemas.py::NodeSpec.enforcement` | `tests/test_kill_authority.py` |
 | An advisory preemption never clears a flight into capacity the incumbent still holds | `core.py::_act_preempt` | `tests/test_kill_authority.py` |
+| The telemetry rollup produces every age band and prunes past a month | `storage.py::rollup_telemetry` | `tests/test_storage.py` |
+| A retry whose stored answer was lost still cannot schedule the work twice | `server.py::clearance_v2` | `tests/test_idempotency.py` |
+| A live lease cannot be released out from under a running flight | `core.py::release_lease` | `tests/test_leases.py` |
 | A warming machine is not a thermal spike | `anomaly.py::detect_spike` | `tests/test_false_positives.py` |
 | The same condition is not reported on every sweep | `anomaly.py::_should_report` | `tests/test_false_positives.py` |
 | A node can join the mesh in one command | `agent.py::node_spec` | `tests/test_onboarding.py` |

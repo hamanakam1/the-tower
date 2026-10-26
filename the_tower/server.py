@@ -17,10 +17,40 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .core import Tower
 from .replay import replay, compare, snapshot_to_dict, snapshot_from_dict
 from .schemas import (
-    ClearanceRequest, Flight, KillRequest, Telemetry, AirspaceSnapshot,
+    ClearanceDecision, ClearanceRequest, Flight, FlightStatus, KillRequest,
+    Telemetry, AirspaceSnapshot,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+_DECISION_FOR_STATUS = {
+    FlightStatus.CLEARED: ClearanceDecision.CLEARED,
+    FlightStatus.IN_FLIGHT: ClearanceDecision.CLEARED,
+    FlightStatus.DRAINING: ClearanceDecision.CLEARED,
+    FlightStatus.LANDED: ClearanceDecision.CLEARED,
+    FlightStatus.QUEUED: ClearanceDecision.QUEUED,
+    FlightStatus.SHOT_DOWN: ClearanceDecision.SHOT_DOWN,
+}
+
+
+def _response_for_existing_flight(flight: Flight, key: str) -> dict:
+    """Rebuild the answer for an idempotency key whose stored payload is gone.
+
+    The key is persisted with the flight before the answer is, so a crash in
+    between used to let a retry schedule the same work a second time. The
+    flight's own state is enough to answer without doing that.
+    """
+    decision = _DECISION_FOR_STATUS.get(flight.status, ClearanceDecision.QUEUED)
+    return {
+        "decision": decision.value,
+        "flight_id": flight.id,
+        "assigned_node": flight.assigned_node,
+        "reason": flight.reason or "this request was already accepted",
+        "estimated_wait_s": None,
+        "admission": None,
+        "idempotency_key": key,
+    }
 
 
 def _version() -> str:
@@ -172,9 +202,13 @@ class TowerServer:
                 existing = tower.flight_by_idempotency_key(key)
                 if existing is not None:
                     stored = (existing.metadata or {}).get("idempotency_response")
-                    if stored:
-                        tower.remember_idempotent(key, stored)
-                        return JSONResponse(stored, status_code=200)
+                    if not stored:
+                        # the answer was never persisted (crash between the
+                        # decision and the metadata write): reconstruct it
+                        # instead of scheduling the work again
+                        stored = _response_for_existing_flight(existing, key)
+                    tower.remember_idempotent(key, stored)
+                    return JSONResponse(stored, status_code=200)
             from .schemas import Flight, ResourceWeight, FlightPriority
             constraints = body.get("constraints") or {}
             flight = Flight(
@@ -227,6 +261,10 @@ class TowerServer:
             lease_id = request.path_params["lease_id"]
             ok = tower.release_lease(lease_id)
             if not ok:
+                if lease_id in tower.leases:
+                    return JSONResponse(
+                        {"error": "lease is held by a flight that is still airborne"},
+                        status_code=409)
                 return JSONResponse({"error": "lease not found"}, status_code=404)
             return JSONResponse({"ok": True})
 

@@ -70,6 +70,16 @@
   forecast is never negative.
 
 ### Reliability
+- **Telemetry rollup actually rolls up.** Every age band (1m, 5m, 1h, 1d) is
+  produced, one row per bucket is enforced by a unique index, and history
+  older than the retention window is pruned. The old code rolled everything
+  into 1-minute buckets and deleted it, so the coarser bands never existed.
+- **A queued flight is not re-announced every sweep.** The dispatcher retries
+  queued work quietly; a retry that reaches the same answer does not write a
+  second event or audit row.
+- **An idempotency key whose answer was lost still cannot reschedule.**
+- **A live lease cannot be released while its flight is still airborne**, and
+  an expired lease cannot be renewed back to life.
 - **Decisions are replayable.** Every clearance records the flight and the
   mesh snapshot it was decided against (`GET /replay/flight/{id}`), including
   queued decisions.
@@ -79,6 +89,12 @@
   assumes a five-second sweep interval.
 - **The agent can register itself.** `the-tower agent --register` describes
   the machine it runs on and stops the Tower simulating that node.
+
+### Dashboard
+- **Every node shows whether it is armed.** The node panel carries an
+  `advisory` / `enforce` badge and an arm/disarm control; arming asks for
+  confirmation first. A lease is its own kind of event, so the log no longer
+  reports one as a second takeoff.
 
 ### Fixed
 - Fix audit id collision: `audit-<epoch-ms>` raised `UNIQUE constraint failed` on two entries in the same millisecond; now `audit-<epoch-ns>`

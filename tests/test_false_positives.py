@@ -147,3 +147,41 @@ def test_the_simulated_signal_behaves_like_a_machine():
             await t.stop()
 
     asyncio.run(run())
+
+
+def test_a_queued_flight_is_not_reannounced_on_every_sweep():
+    """A flight that cannot fly yet must not republish "denied/queued" every
+    tick: the dispatcher retries it, and a retry that reaches the same answer
+    is not a new decision."""
+    import asyncio
+
+    from the_tower.core import Tower
+    from the_tower.schemas import ClearanceRequest, Flight, ResourceWeight
+
+    async def run():
+        t = Tower()
+        await t.start()
+        try:
+            for node in t.nodes.values():
+                node.telemetry = node.telemetry.model_copy(update={
+                    "cpu_percent": 5.0, "memory_percent": 10.0, "temperature_c": 40.0})
+            flight = Flight(task="too big for any node",
+                            weight=ResourceWeight(cpu_cores=64, memory_gb=512,
+                                                  duration_est_s=600))
+            resp = await t.request_clearance(ClearanceRequest(flight=flight))
+            assert resp.decision.value == "queued"
+
+            def denied():
+                return sum("Denied/queued" in e.message for e in t.events)
+
+            first = denied()
+            assert first == 1
+            for _ in range(5):
+                await t._dispatch_queued()
+            assert denied() == first, "a queued flight must not spam the log"
+            assert flight.status.value == "queued"
+            assert await t.verify_audit_async() is True
+        finally:
+            await t.stop()
+
+    asyncio.run(run())

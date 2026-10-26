@@ -56,7 +56,9 @@ Unlike cloud-native applications that assume infinite compute, The Tower operate
 One page, everything the tower knows. The radar sweep plots the nodes by
 bearing and range; the flight board lists every task in the air, in flight or
 queued; the event log is the audit trail; and the node panel reports the live
-thermals, memory and power of each machine in the mesh.
+thermals, memory and power of each machine in the mesh. Every node card says
+whether the Tower is `advisory` or `enforce` for that node, and carries the
+control to arm or disarm it.
 
 <table>
   <tr>
@@ -70,6 +72,10 @@ thermals, memory and power of each machine in the mesh.
   <tr>
     <td width="50%"><img alt="the anti-air battery, the kill console" src="docs/screenshots/anti-air-battery.png"><br><sub><b>anti-air battery</b> &mdash; the kill console. It needs a reason, it only stops processes the Tower was given ownership of, and it can give a flight a grace period to land first.</sub></td>
     <td width="50%"><img alt="the trends panel, tracking thermal slope and the power redline" src="docs/screenshots/trends.png"><br><sub><b>trends</b> &mdash; thermal slope and memory slope per node, and the estimated time to the power redline. A node that is trending to failure gets warned about before it fails.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img alt="the safety ladder, showing each node's enforcement rung" src="docs/screenshots/safety-ladder.png"><br><sub><b>safety ladder</b> &mdash; where each node sits on admit &rarr; warn &rarr; throttle &rarr; drain &rarr; kill, and why. Advisory nodes are told; enforced nodes are acted on.</sub></td>
+    <td width="50%"><img alt="the lease panel, time-bounded claims on node resources" src="docs/screenshots/leases.png"><br><sub><b>leases</b> &mdash; the Tower's time-bounded claims on node resources. When a lease expires the resources come back and the flight is rescheduled.</sub></td>
   </tr>
   <tr>
     <td width="50%"><img alt="the clearance request form" src="docs/screenshots/clearance-request.png"><br><sub><b>clearance request</b> &mdash; ask for takeoff with a resource weight, a priority and an optional node preference.</sub></td>

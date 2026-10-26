@@ -106,6 +106,8 @@ CREATE TABLE IF NOT EXISTS telemetry_rollup (
     load_avg REAL
 );
 CREATE INDEX IF NOT EXISTS idx_rollup_node ON telemetry_rollup(node_id, bucket_start);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rollup_bucket
+    ON telemetry_rollup(node_id, bucket_start, bucket_seconds);
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL,
@@ -168,6 +170,14 @@ MIGRATIONS = [
     (6, "flight drain deadline", [
         "ALTER TABLE flights ADD COLUMN drain_until TEXT",
     ]),
+    # v7 — one row per node/bucket, so a re-run cannot double-count samples.
+    (7, "one row per rollup bucket", [
+        """DELETE FROM telemetry_rollup WHERE rowid NOT IN (
+               SELECT MIN(rowid) FROM telemetry_rollup
+               GROUP BY node_id, bucket_start, bucket_seconds)""",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_rollup_bucket "
+        "ON telemetry_rollup(node_id, bucket_start, bucket_seconds)",
+    ]),
 ]
 
 # The reverse of each migration, applied newest-first when rolling back.
@@ -189,6 +199,9 @@ ROLLBACKS = {
     ],
     6: [
         "ALTER TABLE flights DROP COLUMN drain_until",
+    ],
+    7: [
+        "DROP INDEX IF EXISTS idx_rollup_bucket",
     ],
 }
 
@@ -446,26 +459,39 @@ class Storage:
     # ---- retention / rollup ----
     @_serialised
     def rollup_telemetry(self, now: Optional[float] = None) -> Dict[str, int]:
-        """Roll raw telemetry up into 1-minute, 1-hour and 1-day summaries.
+        """Coarsen raw telemetry into 1-minute, 5-minute, hourly and daily buckets.
 
-        Raw 5-second samples are only useful for the recent past. Older
-        samples are averaged into progressively coarser buckets, so a month
-        of mesh history costs kilobytes instead of gigabytes.
+        Raw 5-second samples are only useful for the recent past. Each age band
+        is rolled into its own bucket size exactly once, and the raw rows are
+        deleted afterwards, so a month of mesh history costs kilobytes instead
+        of gigabytes.
+
+        The bands are disjoint. Rolling the oldest rows into 1-minute buckets
+        and deleting them — which is what this used to do — meant the coarser
+        bands never saw a row and never existed.
         """
         now = now if now is not None else time.time()
-        counts = {"rolled": 0, "deleted": 0}
-        boundaries = [
-            (60.0, 60.0, "1m"),        # keep 1 minute of raw samples
-            (3600.0, 300.0, "5m"),     # keep 1 hour as 5-minute averages
-            (86400.0, 3600.0, "1h"),   # keep 1 day as hourly averages
-            (2592000.0, 86400.0, "1d"), # keep 1 month as daily averages
+        counts = {"rolled": 0, "deleted": 0, "pruned": 0}
+        # (oldest_age_s, newest_age_s, bucket_s). Finest band is [5m, 1m).
+        # The oldest band has no floor: anything older than a day is rolled
+        # into a daily bucket, and the retention prune drops it from there.
+        bands = [
+            (None, 86400.0, 86400.0),        # older than 1d -> daily
+            (86400.0, 3600.0, 3600.0),       # 1h to 1d   -> hourly
+            (3600.0, 300.0, 300.0),          # 5m to 1h   -> 5-minute
+            (300.0, 60.0, 60.0),             # 1m to 5m   -> 1-minute
         ]
-        for raw_keep, bucket, label in boundaries:
-            cutoff = now - raw_keep
+        epoch_floor = "1970-01-01T00:00:00+00:00"
+        for oldest_age, newest_age, bucket in bands:
+            oldest = (epoch_floor if oldest_age is None else
+                      time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                    time.gmtime(now - oldest_age)))
+            newest = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - newest_age))
             rows = self.conn.execute(
                 "SELECT node_id, timestamp, cpu_percent, memory_percent, temperature_c, "
-                "power_watts, load_avg FROM telemetry WHERE timestamp < ?",
-                (time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(cutoff)),),
+                "power_watts, load_avg FROM telemetry "
+                "WHERE timestamp >= ? AND timestamp < ?",
+                (oldest, newest),
             ).fetchall()
             if not rows:
                 continue
@@ -488,17 +514,29 @@ class Storage:
                     """INSERT INTO telemetry_rollup
                        (node_id, bucket_start, bucket_seconds, samples, cpu_percent,
                         memory_percent, temperature_c, power_watts, load_avg)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(node_id, bucket_start, bucket_seconds) DO UPDATE SET
+                       samples=excluded.samples, cpu_percent=excluded.cpu_percent,
+                       memory_percent=excluded.memory_percent,
+                       temperature_c=excluded.temperature_c,
+                       power_watts=excluded.power_watts, load_avg=excluded.load_avg""",
                     (node_id, stamp, int(bucket), n, avg("cpu_percent"),
                      avg("memory_percent"), avg("temperature_c"), avg("power_watts"),
                      avg("load_avg")),
                 )
                 counts["rolled"] += n
+            # these rows now exist as a bucket and must not be rolled twice
             self.conn.execute(
-                "DELETE FROM telemetry WHERE timestamp < ?",
-                (time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(cutoff)),),
+                "DELETE FROM telemetry WHERE timestamp >= ? AND timestamp < ?",
+                (oldest, newest),
             )
             counts["deleted"] += len(rows)
+        # a month is the retention limit for the rolled history too
+        horizon = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                time.gmtime(now - 2592000.0))
+        cur = self.conn.execute(
+            "DELETE FROM telemetry_rollup WHERE bucket_start < ?", (horizon,))
+        counts["pruned"] = cur.rowcount or 0
         self.conn.commit()
         return counts
 

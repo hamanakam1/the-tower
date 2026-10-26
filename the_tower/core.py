@@ -331,7 +331,7 @@ class Tower:
                 # resumes as soon as the incumbent lands or the node is enforced.
                 continue
             try:
-                await self.request_clearance(ClearanceRequest(flight=f))
+                await self.request_clearance(ClearanceRequest(flight=f), announce=False)
             except Exception as e:
                 logger.warning("dispatch error: %s", e)
 
@@ -434,18 +434,22 @@ class Tower:
         return MeshSnapshot(nodes=nodes, in_flight=in_flight,
                             queued_count=len(self._queued_ids))
 
-    async def request_clearance(self, req: ClearanceRequest) -> ClearanceResponse:
+    async def request_clearance(self, req: ClearanceRequest,
+                                announce: bool = True) -> ClearanceResponse:
         """Clear a flight for takeoff, or explain why it cannot fly.
 
         The decision is pure (`policy.decide`); everything below it is the
-        effect: state changes, events, persistence, audit.
+        effect: state changes, events, persistence, audit. `announce=False`
+        is used by the queue dispatcher: a retry that reaches the same answer
+        is not a new decision and must not republish it.
         """
         async with self._lock:
             flight = req.flight
             self.flights[flight.id] = flight
-            self._emit(EventKind.CLEARANCE_REQUEST, flight_id=flight.id,
-                       message=f"Clearance requested: {flight.callsign} ({flight.task[:60]})",
-                       severity="info", data={"weight": flight.weight.model_dump()})
+            if announce:
+                self._emit(EventKind.CLEARANCE_REQUEST, flight_id=flight.id,
+                           message=f"Clearance requested: {flight.callsign} ({flight.task[:60]})",
+                           severity="info", data={"weight": flight.weight.model_dump()})
 
             # --- PURE: decide from a frozen snapshot ---
             snap = self.snapshot()
@@ -465,10 +469,11 @@ class Tower:
                     return await self._act_queued(
                         flight, decision, snap,
                         why=(f"advisory: recommended preempting "
-                             f"{decision.preempt_flight_id}, capacity not freed"))
+                             f"{decision.preempt_flight_id}, capacity not freed"),
+                        announce=announce)
 
             if decision.decision == ClearanceDecision.QUEUED:
-                return await self._act_queued(flight, decision, snap)
+                return await self._act_queued(flight, decision, snap, announce=announce)
 
             best_node = self.nodes.get(decision.assigned_node) if decision.assigned_node else None
             if best_node is not None and self.anomaly.is_rogue_flight(best_node):
@@ -564,9 +569,11 @@ class Tower:
 
     async def _act_queued(self, flight: Flight, decision: Decision,
                           snapshot: Optional[MeshSnapshot] = None,
-                          why: Optional[str] = None) -> ClearanceResponse:
+                          why: Optional[str] = None,
+                          announce: bool = True) -> ClearanceResponse:
         """Put a flight on the waiting list."""
         reason = why or decision.reason
+        unchanged = (flight.status == FlightStatus.QUEUED and flight.reason == reason)
         flight.status = FlightStatus.QUEUED
         self._queued_ids.add(flight.id)
         flight.assigned_node = decision.assigned_node
@@ -577,17 +584,18 @@ class Tower:
                 node.queued_flights.append(flight.id)
         if self.storage is not None:
             await self._store(self.storage.upsert_flight, flight)
-        self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
-                   message=f"Denied/queued: {flight.callsign} - {reason}",
-                   severity="warn")
-        await self.log_audit_async({
-            "kind": "clearance", "flight_id": flight.id, "callsign": flight.callsign,
-            "decision": ClearanceDecision.QUEUED.value, "reason": reason,
-            "admission": decision.to_dict(),
-            # a queued decision is a decision too, and it must be replayable
-            "flight": self.flight_record(flight),
-            "snapshot": snapshot_to_dict(snapshot) if snapshot else None,
-        })
+        if announce or not unchanged:
+            self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
+                       message=f"Denied/queued: {flight.callsign} - {reason}",
+                       severity="warn")
+            await self.log_audit_async({
+                "kind": "clearance", "flight_id": flight.id, "callsign": flight.callsign,
+                "decision": ClearanceDecision.QUEUED.value, "reason": reason,
+                "admission": decision.to_dict(),
+                # a queued decision is a decision too, and it must be replayable
+                "flight": self.flight_record(flight),
+                "snapshot": snapshot_to_dict(snapshot) if snapshot else None,
+            })
         return ClearanceResponse(decision=ClearanceDecision.QUEUED, flight_id=flight.id,
                                 assigned_node=decision.assigned_node,
                                 reason=reason,
@@ -666,7 +674,7 @@ class Tower:
         # the flight holds a time-bounded claim on the node's resources
         lease = self.issue_lease(flight, decision.assigned_node)
         if lease is not None:
-            self._emit(EventKind.TAKEOFF, node_id=decision.assigned_node,
+            self._emit(EventKind.LEASE, node_id=decision.assigned_node,
                        flight_id=flight.id,
                        message=f"Lease {lease.id} issued for {flight.callsign}",
                        severity="info", data={"lease_id": lease.id})
@@ -871,14 +879,26 @@ class Tower:
 
     def renew_lease(self, lease_id: str, ttl_s: Optional[float] = None) -> Optional[Lease]:
         lease = self.leases.get(lease_id)
-        if lease is None or lease.status == LeaseStatus.RELEASED:
+        # Only an active lease can be renewed. Reviving an expired or released
+        # one would claim resources the sweep has already handed back.
+        if lease is None or lease.status != LeaseStatus.ACTIVE:
             return None
         lease.renew(ttl_s)
         return lease
 
     def release_lease(self, lease_id: str, status: LeaseStatus = LeaseStatus.RELEASED) -> bool:
+        """Give a lease back.
+
+        Refused while the flight still holds the node: releasing the claim
+        without stopping the work would let the node be oversubscribed.
+        """
         lease = self.leases.get(lease_id)
-        if lease is None:
+        if lease is None or lease.status != LeaseStatus.ACTIVE:
+            return False
+        flight = self.flights.get(lease.flight_id)
+        if flight is not None and flight.status in (FlightStatus.CLEARED,
+                                                    FlightStatus.IN_FLIGHT,
+                                                    FlightStatus.DRAINING):
             return False
         lease.status = status
         return True
@@ -923,7 +943,7 @@ class Tower:
                     flight.reason = "lease expired (max retries)"
                 self._deindex_scope(flight)
             reaped.append(lease)
-            self._emit(EventKind.ANOMALY, node_id=lease.node_id, flight_id=lease.flight_id,
+            self._emit(EventKind.LEASE, node_id=lease.node_id, flight_id=lease.flight_id,
                        message=f"Lease {lease.id} expired - resources released",
                        severity="warn",
                        data={"lease_id": lease.id, "flight_id": lease.flight_id})

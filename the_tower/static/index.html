@@ -49,6 +49,13 @@
   .badge.offline { color: var(--muted); border-color: var(--muted); }
   .badge.unknown { color: var(--amber); border-color: var(--amber); }
   .badge.draining { color: var(--blue); border-color: var(--blue); }
+  .badge.enforce { color: #fff; background: var(--red); border-color: var(--red); }
+  .badge.advisory { color: var(--blue); border-color: var(--blue); }
+  .btn-tiny { font-size: 9px; letter-spacing: 1px; text-transform: uppercase;
+    background: #0a141c; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px; cursor: pointer; }
+  .btn-tiny:hover { border-color: var(--amber); color: var(--amber); }
+  .btn-tiny.arm:hover { border-color: var(--red); color: var(--red); }
   .bar { height: 8px; background: #0a141c; border-radius: 4px; overflow: hidden; margin: 4px 0; position: relative; }
   .bar > span { display: block; height: 100%; transition: width 0.4s; }
   .bar.cpu > span { background: linear-gradient(90deg, #4da6ff, #39ff88); }
@@ -269,6 +276,17 @@ function renderNodes(nodes) {
         <span class="badge ${statusClass(n.status)}">${n.status}</span>
       </div>
       <div style="font-size:10px;color:var(--muted);margin-bottom:6px;">${n.spec.role} · ${n.spec.location}</div>
+      <div class="row" style="align-items:center;">
+        <span>MODE</span>
+        <span>
+          <span class="badge ${n.spec.enforcement}">${n.spec.enforcement}</span>
+          <button class="btn-tiny ${n.spec.enforcement === 'enforce' ? '' : 'arm'}"
+                  onclick="setEnforcement('${n.spec.id}', '${n.spec.enforcement === 'enforce' ? 'advisory' : 'enforce'}')"
+                  title="${n.spec.enforcement === 'enforce' ? 'Stop acting on this node; recommend only' : 'Let the Tower act on this node'}">
+            ${n.spec.enforcement === 'enforce' ? 'disarm' : 'arm'}
+          </button>
+        </span>
+      </div>
       <div class="row"><span>CPU</span><b>${t.cpu_percent}%</b></div>
       <div class="bar cpu"><span style="width:${t.cpu_percent}%"></span></div>
       <div class="row"><span>MEM</span><b>${t.memory_percent}% (${t.memory_used_gb}/${t.memory_total_gb}GB)</b></div>
@@ -276,7 +294,7 @@ function renderNodes(nodes) {
       <div class="row"><span>TEMP</span><b>${t.temperature_c}°C / ${n.spec.redline_temp_c}°C</b></div>
       <div class="bar temp"><span style="width:${tempPct}%"></span></div>
       <div class="row"><span>PWR</span><b>${t.power_watts}W / ${n.spec.max_power_watts}W</b></div>
-      <div class="row"><span>LOAD</span><b>${t.load_avg} · ${n.active_flights.length} flights</b></div>
+      <div class="row"><span>LOAD</span><b>${t.load_avg} · ${n.active_flights.length} flight${n.active_flights.length === 1 ? "" : "s"}</b></div>
       <div class="row"><span>SOURCE</span><b style="color:${t.source==="simulated"?"var(--amber)":"var(--green)"}">${t.source||"unknown"}</b></div>
       ${t.battery_percent!=null ? `<div class="row"><span>BAT</span><b>${t.battery_percent}%</b></div><div class="bar bat"><span style="width:${t.battery_percent}%"></span></div>` : ""}
       ${t.solar_input_watts!=null ? `<div class="row"><span>SOLAR</span><b>${t.solar_input_watts}W</b></div>` : ""}
@@ -384,6 +402,18 @@ async function requestClearance() {
   };
   const r = await fetchJSON("/clearance", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
   console.log(r);
+  await refresh();
+}
+
+async function setEnforcement(nodeId, mode) {
+  if (mode === "enforce" && !confirm(
+      `Arm ${nodeId}?\n\nThe Tower will kill and preempt flights on this node on its own.`)) {
+    return;
+  }
+  const r = await fetchJSON(`/nodes/${encodeURIComponent(nodeId)}/enforcement`,
+    { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }) });
+  if (r && r.error) { alert(r.error); return; }
   await refresh();
 }
 

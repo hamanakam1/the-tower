@@ -29,6 +29,9 @@ async def test_clearance_issues_a_lease(tower):
     assert lease.memory_gb == 4
     assert lease.status == LeaseStatus.ACTIVE
     assert f.metadata["lease_id"] == lease.id
+    # a lease is its own kind of event, not a second takeoff
+    from the_tower.schemas import EventKind
+    assert any(e.kind == EventKind.LEASE for e in tower.events)
 
 
 @pytest.mark.asyncio
@@ -92,3 +95,38 @@ def test_lease_expiry_math():
     assert lease.remaining_s(now) <= 60
     assert lease.is_expired(now) is False
     assert lease.is_expired(now + timedelta(seconds=120)) is True
+
+
+@pytest.mark.asyncio
+async def test_a_live_lease_cannot_be_released_out_from_under_a_flight(tower):
+    f = Flight(task="still running", weight=ResourceWeight(cpu_cores=2, memory_gb=4,
+                                                          duration_est_s=600))
+    await tower.request_clearance(ClearanceRequest(flight=f))
+    lease = next(iter(tower.leases.values()))
+    assert tower.release_lease(lease.id) is False
+    assert lease.status == LeaseStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_a_lease_is_released_when_its_flight_lands(tower):
+    f = Flight(task="done", weight=ResourceWeight(cpu_cores=1, memory_gb=1,
+                                                  duration_est_s=1))
+    await tower.request_clearance(ClearanceRequest(flight=f))
+    lease = next(iter(tower.leases.values()))
+    f.takeoff_at = f.takeoff_at.replace(year=2000)
+    await tower._progress_flights()
+    assert lease.status == LeaseStatus.RELEASED
+    # and it cannot be released twice
+    assert tower.release_lease(lease.id) is False
+
+
+@pytest.mark.asyncio
+async def test_an_expired_lease_is_not_renewed_back_to_life(tower):
+    f = Flight(task="gone", weight=ResourceWeight(cpu_cores=1, memory_gb=1,
+                                                  duration_est_s=600))
+    await tower.request_clearance(ClearanceRequest(flight=f))
+    lease = next(iter(tower.leases.values()))
+    lease.expires_at = lease.issued_at
+    tower.reap_expired_leases()
+    assert lease.status == LeaseStatus.EXPIRED
+    assert tower.renew_lease(lease.id, ttl_s=600) is None

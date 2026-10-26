@@ -71,6 +71,7 @@ class EventKind(str, Enum):
     KILL = "kill"
     SHOT_DOWN = "shot_down"
     ANOMALY = "anomaly"
+    LEASE = "lease"
     NODE_ONLINE = "node_online"
     NODE_OFFLINE = "node_offline"
     REDLINE = "redline"

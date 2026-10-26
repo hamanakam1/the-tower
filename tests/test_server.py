@@ -222,3 +222,22 @@ def test_node_state_endpoint(client):
     assert r.json()["node"]["status"] == "draining"
     r2 = client.post("/nodes/m3max/state", json={"state": "nonsense"})
     assert r2.status_code == 400
+
+
+def test_enforcement_endpoint_requires_an_explicit_mode(client):
+    # A missing mode must not be read as "enforce".
+    r = client.post("/nodes/m3max/enforcement", json={})
+    assert r.status_code == 400
+    assert "mode" in r.json()["error"]
+
+
+def test_enforcement_endpoint_switches_both_ways(client):
+    start = client.get("/status/m3max").json()["node"]["spec"]["enforcement"]
+    assert start == "advisory"
+    r = client.post("/nodes/m3max/enforcement", json={"mode": "enforce"})
+    assert r.status_code == 200
+    assert r.json()["node"]["spec"]["enforcement"] == "enforce"
+    back = client.post("/nodes/m3max/enforcement", json={"mode": "advisory"})
+    assert back.status_code == 200
+    assert back.json()["node"]["spec"]["enforcement"] == "advisory"
+
