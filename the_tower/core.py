@@ -453,6 +453,9 @@ class Tower:
                     flight_id=f.id, callsign=f.callsign, scope=list(f.scope),
                     priority=int(f.priority), node_id=f.assigned_node,
                     assigned_node=f.assigned_node,
+                    cpu_cores=f.weight.cpu_cores,
+                    memory_gb=f.weight.memory_gb,
+                    gpu_units=f.weight.gpu_units,
                 ))
         return MeshSnapshot(nodes=nodes, in_flight=in_flight,
                             queued_count=len(self._queued_ids))

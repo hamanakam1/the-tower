@@ -72,6 +72,11 @@
   `maintenance` or `draining` node is no longer returned to service by the
   next sweep — including the drain that precedes a kill. A drain clears
   itself once the work in the air is gone; `cordoned` never does.
+- **Preemption places the newcomer.** A preempting flight used to be cleared
+  with no node, no reservation and no lease while the incumbent was shot
+  down. It now takes the incumbent's node, and the preemption only happens
+  when the newcomer actually fits there once the incumbent's weight is
+  released; otherwise the request is queued and the incumbent keeps running.
 
 ### Reliability
 - **Telemetry rollup actually rolls up.** Every age band (1m, 5m, 1h, 1d) is

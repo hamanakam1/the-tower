@@ -108,6 +108,9 @@ async def test_preemption_acts_when_the_node_is_enforced(tower):
     assert resp.decision.value == "cleared"
     assert tower.flights[f1.id].status.value == "shot_down"
     assert tower.flights[f2.id].status.value == "in_flight"
+    # the newcomer takes the node the incumbent was on, with a lease for it
+    assert f2.assigned_node == f1.assigned_node
+    assert any(l.flight_id == f2.id for l in tower.leases.values())
 
 
 @pytest.mark.asyncio

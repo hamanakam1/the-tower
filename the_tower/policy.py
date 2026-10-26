@@ -16,7 +16,7 @@ This split is what makes admission:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -120,6 +120,9 @@ class ScopeView:
     priority: int
     node_id: Optional[str]
     assigned_node: Optional[str] = None
+    cpu_cores: float = 0.0
+    memory_gb: float = 0.0
+    gpu_units: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -197,16 +200,31 @@ def decide(flight: Flight, snapshot: MeshSnapshot) -> Decision:
         )
 
     # 2. Scope conflict. A strictly higher priority flight preempts the
-    #    incumbent; otherwise the request waits its turn.
+    #    incumbent — but only if the incumbent's node can actually take the
+    #    newcomer once the incumbent's weight is removed. Preempting and then
+    #    queueing would shoot down work and run nothing.
     conflict = snapshot.scope_conflict(flight)
     if conflict is not None:
         if int(flight.priority) < int(conflict.priority):
+            node = (snapshot.node(conflict.assigned_node)
+                    if conflict.assigned_node else None)
+            if node is not None and _fits_after_preemption(node, conflict, flight.weight):
+                return Decision(
+                    decision=ClearanceDecision.CLEARED,
+                    reason=(f"scope free after preempting {conflict.callsign} "
+                            f"(higher priority: P{int(flight.priority)} < P{conflict.priority})"),
+                    assigned_node=node.id,
+                    scope_conflict=conflict.flight_id,
+                    preempt_flight_id=conflict.flight_id,
+                    node_state_at_decision=node.state_at_decision(),
+                )
             return Decision(
-                decision=ClearanceDecision.CLEARED,
-                reason=(f"scope free after preempting {conflict.callsign} "
-                        f"(higher priority: P{int(flight.priority)} < P{conflict.priority})"),
+                decision=ClearanceDecision.QUEUED,
+                reason=(f"scope conflict with {conflict.callsign}; its node cannot "
+                        f"take this flight even after preemption"),
+                assigned_node=conflict.assigned_node,
+                estimated_wait_s=30.0,
                 scope_conflict=conflict.flight_id,
-                preempt_flight_id=conflict.flight_id,
             )
         return Decision(
             decision=ClearanceDecision.QUEUED,
@@ -255,12 +273,30 @@ def decide(flight: Flight, snapshot: MeshSnapshot) -> Decision:
     )
 
 
+def _fits_after_preemption(node: NodeView, conflict: ScopeView,
+                           weight: ResourceWeight) -> bool:
+    """Would the node take `weight` once the incumbent's claim is released?
+
+    The incumbent is still in the snapshot, so its reservation has to be
+    removed before the question means anything.
+    """
+    freed = replace(
+        node,
+        reserved_cpu=max(0.0, node.reserved_cpu - conflict.cpu_cores),
+        reserved_memory_gb=max(0.0, node.reserved_memory_gb - conflict.memory_gb),
+        reserved_gpu=max(0.0, node.reserved_gpu - conflict.gpu_units),
+    )
+    return freed.accepts(weight)
+
+
 def _best_eventual_node(snapshot: MeshSnapshot, flight: Flight) -> Optional[NodeView]:
     """The node most likely to accept the flight once capacity frees up."""
     best = None
     best_mem = -1.0
     for n in snapshot.nodes:
-        if n.status == NodeStatus.OFFLINE.value:
+        if n.status in (NodeStatus.OFFLINE.value, NodeStatus.REDLINE.value,
+                        NodeStatus.UNKNOWN.value, NodeStatus.DRAINING.value,
+                        NodeStatus.CORDONED.value, NodeStatus.MAINTENANCE.value):
             continue
         if flight.preferred_node and flight.preferred_node != n.id:
             continue

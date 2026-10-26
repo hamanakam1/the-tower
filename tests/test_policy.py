@@ -109,6 +109,23 @@ def test_scope_conflict_preempts_lower_priority():
     d = decide(flight, snap)
     assert d.decision == ClearanceDecision.CLEARED
     assert d.preempt_flight_id == "f1"
+    # the newcomer lands where the incumbent was: that is the point of
+    # preemption, and without a node the effect layer could not place it
+    assert d.assigned_node == "n1"
+
+
+def test_preemption_is_refused_when_the_newcomer_still_does_not_fit():
+    conflict = ScopeView(flight_id="f1", callsign="FLT-1", scope=["res"], priority=3,
+                         node_id="n1", assigned_node="n1",
+                         cpu_cores=8.0, memory_gb=16.0)
+    node = make_node(reserved_cpu=8.0, reserved_memory_gb=16.0)
+    snap = MeshSnapshot(nodes=[node], in_flight=[conflict])
+    flight = Flight(task="bigger", scope=["res"], priority=FlightPriority.P0,
+                    weight=ResourceWeight(cpu_cores=8, memory_gb=16))
+    d = decide(flight, snap)
+    assert d.decision == ClearanceDecision.QUEUED
+    assert d.preempt_flight_id is None
+    assert "cannot" in d.reason
 
 
 def test_best_scoring_node_wins():
