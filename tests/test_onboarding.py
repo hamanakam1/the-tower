@@ -122,8 +122,9 @@ def test_unregistering_a_node_forgets_it_and_its_claims(tmp_path):
                         cpu_cores=4, memory_gb=8, redline_temp_c=80,
                         max_power_watts=20, network_capacity_mbps=100)
         t.register_node(spec)
-        f = Flight(task="on the pi", weight=ResourceWeight(cpu_cores=1, memory_gb=1,
-                                                           duration_est_s=600))
+        # Exercise this node's removal even when another node scores higher.
+        f = Flight(task="on the pi", preferred_node="pi-01",
+                   weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=600))
         await t.request_clearance(ClearanceRequest(flight=f))
         assert f.assigned_node == "pi-01"
         lease = next(l for l in t.leases.values() if l.flight_id == f.id)
