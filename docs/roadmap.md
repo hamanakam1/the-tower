@@ -207,6 +207,14 @@ reports anything real reports a temperature it guessed.
 - `safety.py` — an `offline` or `unknown` node was shown at the `kill` rung of
   the ladder, implying the Tower was about to terminate work it could not
   even see. Those states are `drain`: stop adding work, touch nothing.
+- `static/index.html` — the dashboard built its panels with `innerHTML` and
+  interpolated API fields raw. Node names, task text, event messages and
+  container ids are operator input, so a node registered with
+  `<img src=x onerror=…>` ran script in the same origin as
+  `POST /nodes/:id/enforcement` and `POST /kill/:id`. Every field is escaped
+  now, the arm/disarm control carries its node in `data-` attributes instead
+  of an inline `onclick` string, and `tests/test_dashboard.py` fails on a new
+  raw interpolation.
 
 > These fixes are in this branch (except the dependency declaration, which
 > landed in the `v0.3.0` tag), with regression tests in
@@ -215,7 +223,9 @@ reports anything real reports a temperature it guessed.
 > [`tests/test_anomaly.py`](../tests/test_anomaly.py),
 > [`tests/test_false_positives.py`](../tests/test_false_positives.py),
 > [`tests/test_idempotency.py`](../tests/test_idempotency.py),
-> [`tests/test_replayability.py`](../tests/test_replayability.py) and
+> [`tests/test_replayability.py`](../tests/test_replayability.py),
+> [`tests/test_metrics.py`](../tests/test_metrics.py),
+> [`tests/test_dashboard.py`](../tests/test_dashboard.py) and
 > [`tests/test_onboarding.py`](../tests/test_onboarding.py). The rest are
 > scheduled in Horizon 0.
 
@@ -238,7 +248,7 @@ what was intended.
 | 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
 | 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
 | 0.11 | Bounded rate-limit buckets, CORS allowlist | **done** | `server.py`; `TOWER_CORS_ORIGINS`, no wildcard default |
-| 0.12 | Fill the test gaps | **done** | 184 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability, metrics and onboarding |
+| 0.12 | Fill the test gaps | **done** | 187 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability, metrics, dashboard and onboarding |
 | — | Graded safety ladder (§3.2) | **done** | `the_tower/safety.py`: admit → warn → throttle → drain → kill |
 | — | Pure decision core (§3.1) | **done** | `the_tower/policy.py`; the Tower drives it with a frozen snapshot |
 | — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`, advisory by default; the Tower recommends instead of acting |
@@ -273,6 +283,8 @@ Each one has a test.
 | Unregistering a node forgets it permanently and releases its claims | `core.py::unregister_node` | `tests/test_onboarding.py` |
 | A cordoned, draining or maintained node is never returned to service by telemetry | `radar.py::_status_for` | `tests/test_core.py` |
 | A fresh drain returns the node to service once the work in the air is gone | `core.py::_progress_flights` | `tests/test_core.py` |
+| Operator-supplied text cannot execute in the dashboard | `static/index.html::esc` | `tests/test_dashboard.py` |
+| The arm/disarm control carries no data in an inline handler | `static/index.html` | `tests/test_dashboard.py` |
 | A warming machine is not a thermal spike | `anomaly.py::detect_spike` | `tests/test_false_positives.py` |
 | The same condition is not reported on every sweep | `anomaly.py::_should_report` | `tests/test_false_positives.py` |
 | A node can join the mesh in one command | `agent.py::node_spec` | `tests/test_onboarding.py` |

@@ -264,24 +264,34 @@ function renderStats(s) {
 
 function statusClass(s){ return s.toLowerCase().replace("_",""); }
 
+// Everything below is rendered into innerHTML. Node names, task text and
+// event messages all come from the API, which is operator input. Escape
+// first: the dashboard runs in the same origin as the endpoints that can
+// arm a node.
+function esc(v){
+  return String(v ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
 function renderNodes(nodes) {
   const el = document.getElementById("nodes");
   el.innerHTML = nodes.map(n => {
     const t = n.telemetry;
-    const free = { cpu: n.spec.cpu_cores*(1-t.cpu_percent/100), mem: n.spec.memory_gb*(1-t.memory_percent/100) };
     const tempPct = Math.min(100, t.temperature_c / n.spec.redline_temp_c * 100);
+    const nextMode = n.spec.enforcement === 'enforce' ? 'advisory' : 'enforce';
     return `<div class="node-card">
       <div class="node-head">
-        <span class="node-name">${n.spec.name}</span>
-        <span class="badge ${statusClass(n.status)}">${n.status}</span>
+        <span class="node-name">${esc(n.spec.name)}</span>
+        <span class="badge ${esc(statusClass(n.status))}">${esc(n.status)}</span>
       </div>
-      <div style="font-size:10px;color:var(--muted);margin-bottom:6px;">${n.spec.role} · ${n.spec.location}</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:6px;">${esc(n.spec.role)} · ${esc(n.spec.location)}</div>
       <div class="row" style="align-items:center;">
         <span>MODE</span>
         <span>
-          <span class="badge ${n.spec.enforcement}">${n.spec.enforcement}</span>
+          <span class="badge ${esc(n.spec.enforcement)}">${esc(n.spec.enforcement)}</span>
           <button class="btn-tiny ${n.spec.enforcement === 'enforce' ? '' : 'arm'}"
-                  onclick="setEnforcement('${n.spec.id}', '${n.spec.enforcement === 'enforce' ? 'advisory' : 'enforce'}')"
+                  data-node="${esc(n.spec.id)}" data-next-mode="${nextMode}"
                   title="${n.spec.enforcement === 'enforce' ? 'Stop acting on this node; recommend only' : 'Let the Tower act on this node'}">
             ${n.spec.enforcement === 'enforce' ? 'disarm' : 'arm'}
           </button>
@@ -295,11 +305,14 @@ function renderNodes(nodes) {
       <div class="bar temp"><span style="width:${tempPct}%"></span></div>
       <div class="row"><span>PWR</span><b>${t.power_watts}W / ${n.spec.max_power_watts}W</b></div>
       <div class="row"><span>LOAD</span><b>${t.load_avg} · ${n.active_flights.length} flight${n.active_flights.length === 1 ? "" : "s"}</b></div>
-      <div class="row"><span>SOURCE</span><b style="color:${t.source==="simulated"?"var(--amber)":"var(--green)"}">${t.source||"unknown"}</b></div>
+      <div class="row"><span>SOURCE</span><b style="color:${t.source==="simulated"?"var(--amber)":"var(--green)"}">${esc(t.source||"unknown")}</b></div>
       ${t.battery_percent!=null ? `<div class="row"><span>BAT</span><b>${t.battery_percent}%</b></div><div class="bar bat"><span style="width:${t.battery_percent}%"></span></div>` : ""}
       ${t.solar_input_watts!=null ? `<div class="row"><span>SOLAR</span><b>${t.solar_input_watts}W</b></div>` : ""}
     </div>`;
   }).join("");
+  el.querySelectorAll("button[data-node]").forEach(b => {
+    b.addEventListener("click", () => setEnforcement(b.dataset.node, b.dataset.nextMode));
+  });
 }
 
 function renderFlights(flights) {
@@ -309,11 +322,11 @@ function renderFlights(flights) {
     const cls = f.status==="shot_down"?"shot": f.status==="landed"?"landed":(f.status==="in_flight"||f.status==="draining")?"inflight":"";
     const prio = "P"+f.priority;
     return `<tr class="${cls}">
-      <td>${f.callsign}</td>
-      <td title="${f.task}">${f.task.slice(0,42)}</td>
-      <td>${f.assigned_node||"—"}</td>
+      <td>${esc(f.callsign)}</td>
+      <td title="${esc(f.task)}">${esc(f.task.slice(0,42))}</td>
+      <td>${esc(f.assigned_node||"—")}</td>
       <td>${prio}</td>
-      <td>${f.status}${f.reason? " — "+f.reason.slice(0,40):""}</td>
+      <td>${esc(f.status)}${f.reason? " — "+esc(f.reason.slice(0,40)):""}</td>
     </tr>`;
   }).join("") || `<tr><td colspan="5" style="color:var(--muted);text-align:center;">No flights</td></tr>`;
 }
@@ -325,9 +338,9 @@ function renderLadder(l) {
   const order = ["kill","drain","throttle","warn","admit"];
   const rows = Object.entries(l.nodes).map(([nid, a]) => `
     <div style="padding:4px 0;border-bottom:1px solid var(--border);">
-      <b style="color:${colors[a.ladder]||"var(--fg)"}">${a.ladder.toUpperCase()}</b>
-      <span style="color:var(--muted)">${nid}</span><br/>
-      <span style="color:var(--muted)">${a.reason}</span>
+      <b style="color:${esc(colors[a.ladder]||"var(--fg)")}">${esc(a.ladder.toUpperCase())}</b>
+      <span style="color:var(--muted)">${esc(nid)}</span><br/>
+      <span style="color:var(--muted)">${esc(a.reason)}</span>
     </div>`).join("");
   const counts = order.filter(k => l.counts[k]).map(k =>
     `<span style="color:${colors[k]}">${l.counts[k]} ${k}</span>`).join(" · ");
@@ -341,8 +354,8 @@ function renderLeases(ls) {
     const left = Math.max(0, Math.round((exp - new Date()) / 1000));
     const color = left < 30 ? "var(--red)" : left < 120 ? "var(--amber)" : "var(--green)";
     return `<div style="padding:4px 0;border-bottom:1px solid var(--border);">
-      <b style="color:var(--cyan)">${l.flight_id}</b> <span style="color:var(--muted)">${l.node_id}</span><br/>
-      <span style="color:${color}">${l.status} · ${left}s left</span> ·
+      <b style="color:var(--cyan)">${esc(l.flight_id)}</b> <span style="color:var(--muted)">${esc(l.node_id)}</span><br/>
+      <span style="color:${color}">${esc(l.status)} · ${left}s left</span> ·
       <span style="color:var(--muted)">${l.cpu_cores}c / ${l.memory_gb}GB</span>
     </div>`;
   }).join("");
@@ -351,23 +364,24 @@ function renderContainers(cs) {
   const el = document.getElementById("containers");
   if (!cs || !cs.length) { el.innerHTML = '<span style="color:var(--muted)">No containers</span>'; return; }
   el.innerHTML = cs.map(c => `<div style="padding:4px 0;border-bottom:1px solid var(--border);">
-    <b style="color:var(--cyan)">${c.container_id}</b> <span style="color:var(--muted)">${c.status}</span><br/>
-    <span style="color:var(--muted)">node: ${c.node_id||"—"} · hb: ${new Date(c.last_heartbeat).toLocaleTimeString()}</span>
+    <b style="color:var(--cyan)">${esc(c.container_id)}</b> <span style="color:var(--muted)">${esc(c.status)}</span><br/>
+    <span style="color:var(--muted)">node: ${esc(c.node_id||"—")} · hb: ${new Date(c.last_heartbeat).toLocaleTimeString()}</span>
   </div>`).join("");
 }
 function renderEvents(evs) {
   const el = document.getElementById("events");
   el.innerHTML = evs.slice().reverse().map(e => `
-    <div class="evt ${e.severity}">
-      <div class="ts">${new Date(e.timestamp).toLocaleTimeString()} · ${e.kind}</div>
-      <div>${e.message}</div>
+    <div class="evt ${esc(e.severity)}">
+      <div class="ts">${new Date(e.timestamp).toLocaleTimeString()} · ${esc(e.kind)}</div>
+      <div>${esc(e.message)}</div>
     </div>`).join("");
 }
 
 function renderNodeSelect(nodes) {
   const sel = document.getElementById("node");
   const cur = sel.value;
-  sel.innerHTML = `<option value="">auto</option>` + nodes.map(n=>`<option value="${n.spec.id}">${n.spec.name}</option>`).join("");
+  sel.innerHTML = `<option value="">auto</option>` + nodes.map(n=>
+    `<option value="${esc(n.spec.id)}">${esc(n.spec.name)}</option>`).join("");
   sel.value = cur;
 }
 
@@ -378,7 +392,7 @@ async function renderTrends(nodes) {
     try {
       const t = await fetchJSON(`/trend/${n.spec.id}`);
       parts.push(`<div style="margin-bottom:8px;font-size:11px;">
-        <b style="color:var(--cyan)">${n.spec.name}</b><br/>
+        <b style="color:var(--cyan)">${esc(n.spec.name)}</b><br/>
         temp slope: ${t.temp_slope}°C/sample · mem slope: ${t.mem_slope}%/sample<br/>
         ${t.secs_to_redline!=null ? `<span style="color:var(--amber)">ETA redline: ${t.secs_to_redline}s</span>` : "stable"}
       </div>`);

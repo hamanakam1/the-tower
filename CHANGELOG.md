@@ -114,6 +114,10 @@
   `advisory` / `enforce` badge and an arm/disarm control; arming asks for
   confirmation first. A lease is its own kind of event, so the log no longer
   reports one as a second takeoff.
+- **Operator text is escaped.** Node names, task text, event messages and
+  container ids are rendered as text, not markup. A node registered with an
+  `<img onerror=…>` name is inert, and the arm/disarm control carries its node
+  in `data-` attributes rather than an inline handler string.
 
 ### Operations
 - **`/metrics` answers operational questions.** Per-node enforcement mode,
