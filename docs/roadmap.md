@@ -175,6 +175,19 @@ reports anything real reports a temperature it guessed.
   now refuses release (409), and only an active lease can be renewed.
 - `schemas.py` — a lease was emitted as a second `takeoff` event. It has its
   own `lease` kind now.
+- `core.py` — `nodes_online` counted every node that was not `offline`,
+  including `unknown`. A node whose telemetry had gone stale therefore showed
+  as online, and a dashboard or pager watching 3/3 could not see a dead
+  machine. Reachability is now its own set of states.
+- `metrics.py` — the only series were CPU, memory and temperature, so nothing
+  could alert on "this node is armed and at redline" or "this node has stopped
+  reporting". Added per-node enforcement, thermal margin, telemetry age,
+  status (one-hot), safety-ladder rung, active leases and landed flights.
+  Label values are escaped: node ids are operator input.
+- `core.py` — `DELETE /nodes/:id` only forgot the node in memory. Its spec
+  stayed on disk and the node came back on the next start, and its leases and
+  queued flights were never released. Unregistering now deletes the spec and
+  closes every claim the node held.
 
 > These fixes are in this branch (except the dependency declaration, which
 > landed in the `v0.3.0` tag), with regression tests in
@@ -206,7 +219,7 @@ what was intended.
 | 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
 | 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
 | 0.11 | Bounded rate-limit buckets, CORS allowlist | **done** | `server.py`; `TOWER_CORS_ORIGINS`, no wildcard default |
-| 0.12 | Fill the test gaps | **done** | 170 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability and onboarding |
+| 0.12 | Fill the test gaps | **done** | 176 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability, metrics and onboarding |
 | — | Graded safety ladder (§3.2) | **done** | `the_tower/safety.py`: admit → warn → throttle → drain → kill |
 | — | Pure decision core (§3.1) | **done** | `the_tower/policy.py`; the Tower drives it with a frozen snapshot |
 | — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`, advisory by default; the Tower recommends instead of acting |
@@ -234,6 +247,9 @@ Each one has a test.
 | The telemetry rollup produces every age band and prunes past a month | `storage.py::rollup_telemetry` | `tests/test_storage.py` |
 | A retry whose stored answer was lost still cannot schedule the work twice | `server.py::clearance_v2` | `tests/test_idempotency.py` |
 | A live lease cannot be released out from under a running flight | `core.py::release_lease` | `tests/test_leases.py` |
+| A node with stale telemetry is not reported as online | `core.py::airspace` | `tests/test_metrics.py` |
+| A node id cannot forge a metric series | `metrics.py::_label` | `tests/test_metrics.py` |
+| Unregistering a node forgets it permanently and releases its claims | `core.py::unregister_node` | `tests/test_onboarding.py` |
 | A warming machine is not a thermal spike | `anomaly.py::detect_spike` | `tests/test_false_positives.py` |
 | The same condition is not reported on every sweep | `anomaly.py::_should_report` | `tests/test_false_positives.py` |
 | A node can join the mesh in one command | `agent.py::node_spec` | `tests/test_onboarding.py` |

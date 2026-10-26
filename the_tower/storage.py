@@ -599,6 +599,17 @@ class Storage:
         rows = self.conn.execute("SELECT id, spec_json FROM nodes").fetchall()
         return {r["id"]: r["spec_json"] for r in rows}
 
+    @_serialised
+    def delete_node_spec(self, node_id: str) -> bool:
+        """Forget a node permanently.
+
+        Without this, an unregistered node came back on the next start: the
+        spec was still on disk.
+        """
+        cur = self.conn.execute("DELETE FROM nodes WHERE id=?", (node_id,))
+        self.conn.commit()
+        return (cur.rowcount or 0) > 0
+
     # ---- audit hash chain ----
     @_serialised
     def append_audit(self, payload: Dict[str, Any]) -> str:

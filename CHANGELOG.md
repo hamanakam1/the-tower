@@ -80,6 +80,9 @@
 - **An idempotency key whose answer was lost still cannot reschedule.**
 - **A live lease cannot be released while its flight is still airborne**, and
   an expired lease cannot be renewed back to life.
+- **Unregistering a node forgets it.** The spec is deleted from the store, so
+  the node does not come back on restart, and the flights, leases and queue
+  entries it was holding are closed with it.
 - **Decisions are replayable.** Every clearance records the flight and the
   mesh snapshot it was decided against (`GET /replay/flight/{id}`), including
   queued decisions.
@@ -95,6 +98,13 @@
   `advisory` / `enforce` badge and an arm/disarm control; arming asks for
   confirmation first. A lease is its own kind of event, so the log no longer
   reports one as a second takeoff.
+
+### Operations
+- **`/metrics` answers operational questions.** Per-node enforcement mode,
+  thermal margin to redline, telemetry age, one-hot lifecycle status, safety
+  ladder rung, and the number of active leases. Label values are escaped.
+- **`nodes_online` means reachable.** A node whose telemetry went stale is
+  `unknown` and is no longer counted as online.
 
 ### Fixed
 - Fix audit id collision: `audit-<epoch-ms>` raised `UNIQUE constraint failed` on two entries in the same millisecond; now `audit-<epoch-ns>`

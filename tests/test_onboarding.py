@@ -99,3 +99,43 @@ def test_the_agent_says_so_when_the_node_is_not_registered():
         await t.stop()
 
     asyncio.run(run())
+
+
+def test_unregistering_a_node_forgets_it_and_its_claims(tmp_path):
+    """Regression: unregistering deleted the node from memory only. The spec
+    stayed on disk, so the node came back on restart, and its leases and
+    queued flights kept advertising capacity that no longer existed."""
+    import asyncio
+
+    from the_tower.schemas import (
+        ClearanceRequest, Flight, FlightStatus, LeaseStatus, NodeSpec, ResourceWeight,
+    )
+
+    async def run():
+        db = str(tmp_path / "tower.sqlite")
+        t = Tower(db_path=db)
+        await t.start()
+        for n in t.nodes.values():
+            n.telemetry = n.telemetry.model_copy(update={"cpu_percent": 5.0,
+                                                         "memory_percent": 10.0})
+        spec = NodeSpec(id="pi-01", name="Pi", role="t", specs="x", constraints="y",
+                        cpu_cores=4, memory_gb=8, redline_temp_c=80,
+                        max_power_watts=20, network_capacity_mbps=100)
+        t.register_node(spec)
+        f = Flight(task="on the pi", weight=ResourceWeight(cpu_cores=1, memory_gb=1,
+                                                           duration_est_s=600))
+        await t.request_clearance(ClearanceRequest(flight=f))
+        assert f.assigned_node == "pi-01"
+        lease = next(l for l in t.leases.values() if l.flight_id == f.id)
+
+        assert t.unregister_node("pi-01") is True
+        assert f.status == FlightStatus.SHOT_DOWN
+        assert lease.status == LeaseStatus.RELEASED
+        await t.stop()
+
+        t2 = Tower(db_path=db)
+        await t2.start()
+        assert t2.get_node("pi-01") is None, "an unregistered node must stay gone"
+        await t2.stop()
+
+    asyncio.run(run())

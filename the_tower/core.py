@@ -28,6 +28,14 @@ import logging
 
 logger = logging.getLogger("the_tower")
 
+# A node is "online" when the Tower can still believe its reports. STALE
+# telemetry (UNKNOWN) and OFFLINE are not online; lifecycle states on a live
+# machine are.
+_REACHABLE_STATUSES = {
+    NodeStatus.ONLINE, NodeStatus.DEGRADED, NodeStatus.OVERLOADED,
+    NodeStatus.REDLINE, NodeStatus.DRAINING,
+}
+
 
 class Tower:
     """Hardware ATC controller."""
@@ -1013,20 +1021,46 @@ class Tower:
     def unregister_node(self, node_id: str) -> bool:
         if node_id not in self.nodes:
             return False
-        # shoot down flights on that node
         node = self.nodes[node_id]
+        # Every claim the node was holding has to go with it, or the lease and
+        # queue panels keep advertising capacity that no longer exists.
         for fid in list(node.active_flights):
             f = self.flights.get(fid)
-            if f:
+            if f is None:
+                continue
+            f.status = FlightStatus.SHOT_DOWN
+            f.shot_down_at = datetime.now(timezone.utc)
+            f.reason = "node unregistered"
+            self._deindex_scope(f)
+            self._queued_ids.discard(fid)
+            if self.storage is not None:
+                self.storage.upsert_flight(f)  # sync path (unregister_node is sync)
+        for fid in list(node.queued_flights):
+            f = self.flights.get(fid)
+            self._queued_ids.discard(fid)
+            if f is not None and f.status == FlightStatus.QUEUED:
                 f.status = FlightStatus.SHOT_DOWN
                 f.shot_down_at = datetime.now(timezone.utc)
                 f.reason = "node unregistered"
                 if self.storage is not None:
-                    self.storage.upsert_flight(f)  # sync path (unregister_node is sync)
+                    self.storage.upsert_flight(f)
+        for lease in self.leases.values():
+            if lease.node_id == node_id and lease.status == LeaseStatus.ACTIVE:
+                lease.status = LeaseStatus.RELEASED
+        node.active_flights.clear()
+        node.queued_flights.clear()
+        node.active_weights.clear()
         del self.nodes[node_id]
         self.radar.nodes.pop(node_id, None)
+        self._node_ladder.pop(node_id, None)
+        if self.storage is not None:
+            try:
+                self.storage.delete_node_spec(node_id)
+            except Exception as e:
+                logger.warning("node spec delete failed: %s", e)
         self._emit(EventKind.NODE_OFFLINE, node_id=node_id,
                    message=f"Node unregistered: {node_id}", severity="warn")
+        self.log_audit({"kind": "node_unregistered", "node_id": node_id})
         return True
 
     # ---------------- conflict detection ----------------
@@ -1086,7 +1120,11 @@ class Tower:
         flights = list(self.flights.values())
         events = list(self.events)[-100:]
         stats = {
-            "nodes_online": sum(1 for n in self.nodes.values() if n.status != NodeStatus.OFFLINE),
+            # "online" means reachable. A node with stale telemetry is
+            # UNKNOWN, and counting it as online would hide a dead machine
+            # behind a healthy-looking 3/3.
+            "nodes_online": sum(1 for n in self.nodes.values()
+                                if n.status in _REACHABLE_STATUSES),
             "nodes_total": len(self.nodes),
             "flights_total": len(flights),
             "flights_in_flight": sum(1 for f in flights if f.status == FlightStatus.IN_FLIGHT),
