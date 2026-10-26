@@ -886,8 +886,7 @@ class Tower:
                 thermal_state=ThermalState.NOMINAL,
             ),
         )
-        self.nodes[spec.id] = node
-        self.radar.nodes[spec.id] = node
+        self.radar.register_node(node)
         if self.storage is not None:
             self.storage.upsert_node_spec(spec.id, spec.model_dump_json())
         self._emit(EventKind.NODE_ONLINE, node_id=spec.id,
@@ -1081,8 +1080,7 @@ class Tower:
         node.active_flights.clear()
         node.queued_flights.clear()
         node.active_weights.clear()
-        del self.nodes[node_id]
-        self.radar.nodes.pop(node_id, None)
+        self.radar.unregister_node(node_id)
         self._node_ladder.pop(node_id, None)
         if self.storage is not None:
             try:

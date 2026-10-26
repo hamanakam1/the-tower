@@ -48,6 +48,16 @@ class RadarSweep:
         self._task: Optional[asyncio.Task] = None
         self._subscribers: List = []
 
+    def register_node(self, node: Node) -> None:
+        """Give a newly registered node sampler state before it joins a sweep."""
+        self._phase[node.id] = random.random() * math.pi * 2
+        self.nodes[node.id] = node
+
+    def unregister_node(self, node_id: str) -> None:
+        """Discard sampler state with the node so re-registration starts fresh."""
+        self.nodes.pop(node_id, None)
+        self._phase.pop(node_id, None)
+
     def subscribe(self, cb):
         self._subscribers.append(cb)
 
