@@ -114,17 +114,34 @@ async def test_preemption_acts_when_the_node_is_enforced(tower):
 
 
 @pytest.mark.asyncio
-async def test_container_stale_kill(tower):
-    import asyncio
+async def test_a_stale_container_on_an_advisory_node_is_only_reported(tower):
+    from datetime import datetime, timedelta, timezone
+
     tower.register_container("c-stale", node_id="m3max")
-    # backdate heartbeat
-    tower.containers["c-stale"]["last_heartbeat"] = __import__("datetime").datetime.now(__import__("datetime").timezone.utc) - __import__("datetime").timedelta(seconds=100)
-    # trigger sweep
+    tower.containers["c-stale"]["last_heartbeat"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=100))
     await tower.radar.sweep_once()
-    # sweep calls kill for stale; flight may not exist but container status? kill executed
-    # ensure no crash; container marked? kill doesn't update container status; check event
-    events = [e.message for e in tower.events]
-    assert any("c-stale" in m for m in events)
+    # m3max is advisory: the Tower recommends the kill and does not take it
+    assert tower.containers["c-stale"]["status"] == "running"
+    messages = [e.message for e in tower.events]
+    assert any("ADVISORY" in m and "c-stale" in m for m in messages)
+    # and it does not repeat the recommendation on the next sweep
+    before = sum("ADVISORY" in m and "c-stale" in m for m in messages)
+    await tower.radar.sweep_once()
+    after = sum("ADVISORY" in e.message and "c-stale" in e.message for e in tower.events)
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_a_stale_container_on_an_enforced_node_is_killed(tower):
+    from datetime import datetime, timedelta, timezone
+
+    tower.set_enforcement("m3max", "enforce")
+    tower.register_container("c-stale", node_id="m3max")
+    tower.containers["c-stale"]["last_heartbeat"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=100))
+    await tower.radar.sweep_once()
+    assert tower.containers["c-stale"]["status"] == "killed"
 
 
 @pytest.mark.asyncio

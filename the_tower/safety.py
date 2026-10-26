@@ -76,13 +76,16 @@ def assess(node: NodeView, flight: Optional[Flight] = None,
     headroom = node.redline_temp_c - node.temperature_c
 
     # 1. Hard stops. A node that is offline, unknown, at redline, or
-    #    thermally critical cannot take work. This is not a negotiation.
+    #    thermally critical cannot take new work. "Unknown" means the Tower
+    #    cannot see the machine, and the safe answer to not being able to see
+    #    is to stop adding work — not to reach in and kill what may be fine.
     if node.status == "offline":
-        return Assessment(Ladder.KILL, "node is offline", severity="critical",
-                          headroom_c=headroom, thermal_state=node.thermal_state,
-                          metrics=metrics)
+        return Assessment(Ladder.DRAIN, "node is offline - no new work",
+                          severity="critical", headroom_c=headroom,
+                          thermal_state=node.thermal_state, metrics=metrics)
     if node.status == "unknown":
-        return Assessment(Ladder.KILL, "telemetry is stale - node state is unknown",
+        return Assessment(Ladder.DRAIN,
+                          "telemetry is stale - node state is unknown; refusing new work",
                           severity="critical", headroom_c=headroom,
                           thermal_state=node.thermal_state, metrics=metrics)
     if node.status == "redline" or node.temperature_c >= node.redline_temp_c:

@@ -199,6 +199,14 @@ reports anything real reports a temperature it guessed.
   was shot down. Preemption now places the newcomer on the incumbent's node
   and only fires when the newcomer actually fits there; otherwise the request
   is queued and the incumbent keeps running.
+- `core.py` — the stale-container watchdog killed a silent container on every
+  node, including advisory ones, and closed its flight. If the Tower did not
+  own the process, that freed capacity while the process was still running.
+  A silent container on an advisory node is now a recommendation (published
+  once a minute); a kill needs either an enforced node or an owned pid.
+- `safety.py` — an `offline` or `unknown` node was shown at the `kill` rung of
+  the ladder, implying the Tower was about to terminate work it could not
+  even see. Those states are `drain`: stop adding work, touch nothing.
 
 > These fixes are in this branch (except the dependency declaration, which
 > landed in the `v0.3.0` tag), with regression tests in
@@ -230,7 +238,7 @@ what was intended.
 | 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
 | 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
 | 0.11 | Bounded rate-limit buckets, CORS allowlist | **done** | `server.py`; `TOWER_CORS_ORIGINS`, no wildcard default |
-| 0.12 | Fill the test gaps | **done** | 182 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability, metrics and onboarding |
+| 0.12 | Fill the test gaps | **done** | 184 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability, metrics and onboarding |
 | — | Graded safety ladder (§3.2) | **done** | `the_tower/safety.py`: admit → warn → throttle → drain → kill |
 | — | Pure decision core (§3.1) | **done** | `the_tower/policy.py`; the Tower drives it with a frozen snapshot |
 | — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`, advisory by default; the Tower recommends instead of acting |
@@ -256,6 +264,7 @@ Each one has a test.
 | A fresh Tower advises; it never kills or preempts without an explicit opt-in | `schemas.py::NodeSpec.enforcement` | `tests/test_kill_authority.py` |
 | An advisory preemption never clears a flight into capacity the incumbent still holds | `core.py::_act_preempt` | `tests/test_kill_authority.py` |
 | A preemption only happens when the newcomer fits the incumbent's node afterwards | `policy.py::decide` | `tests/test_policy.py` |
+| A silent container on an advisory node is reported, not killed | `core.py::_on_sweep` | `tests/test_core.py` |
 | The telemetry rollup produces every age band and prunes past a month | `storage.py::rollup_telemetry` | `tests/test_storage.py` |
 | A retry whose stored answer was lost still cannot schedule the work twice | `server.py::clearance_v2` | `tests/test_idempotency.py` |
 | A live lease cannot be released out from under a running flight | `core.py::release_lease` | `tests/test_leases.py` |

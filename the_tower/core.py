@@ -101,6 +101,8 @@ class Tower:
         # explicitly registered with the Tower ends up here, and nothing
         # else on the host is ever signalled.
         self._owned_pids: Dict[int, str] = {}  # pid -> container_id
+        # container id -> last time an advisory kill was recommended
+        self._stale_advised: Dict[str, float] = {}
         # persist node specs
         if self.storage is not None:
             for spec in specs:
@@ -194,10 +196,21 @@ class Tower:
                 # auto-kill check: if redline breach, shoot down active flights on that node
                 if ev.kind == EventKind.REDLINE:
                     await self._auto_kill_on_redline(nid)
-        # stale container kill-switch
+        # stale container kill-switch. Advisory nodes are only told; acting
+        # without either an enforced node or an owned pid would close a
+        # flight and hand its capacity back while the process may still run.
         for cid in self.stale_containers():
+            info = self.containers.get(cid) or {}
+            node = self.nodes.get(info.get("node_id")) if info.get("node_id") else None
+            owned = self._owned_pid_for(cid) is not None
+            enforced = node is not None and node.spec.enforcement == "enforce"
+            if not (owned or enforced):
+                self._advise_stale_container(cid, info, node)
+                continue
             try:
-                await self.kill(KillRequest(container_id=cid, reason="heartbeat timeout", requester="tower"))
+                await self.kill(KillRequest(container_id=cid,
+                                            reason="heartbeat timeout",
+                                            requester="tower"))
             except Exception as e:
                 logger.warning("stale kill error: %s", e)
         # telemetry retention: roll old samples up so history stays small
@@ -1233,6 +1246,35 @@ class Tower:
             if (now - info["last_heartbeat"]).total_seconds() > timeout_s:
                 out.append(cid)
         return out
+
+    def _advise_stale_container(self, container_id: str, info: Dict[str, Any],
+                                node: Optional[Node]):
+        """Recommend killing a silent container without doing it.
+
+        One recommendation per minute: a silent container is a condition, not
+        an event, and the log must not repeat it every sweep.
+        """
+        now = time.time()
+        last = self._stale_advised.get(container_id, 0.0)
+        if now - last < 60.0:
+            return
+        if len(self._stale_advised) > 512:
+            for key in [k for k, ts in self._stale_advised.items() if now - ts > 300]:
+                self._stale_advised.pop(key, None)
+        self._stale_advised[container_id] = now
+        where = f" on {node.spec.name}" if node else ""
+        self._emit(EventKind.ANOMALY, node_id=node.spec.id if node else None,
+                   message=(f"ADVISORY: {container_id}{where} has stopped reporting - "
+                            f"recommend killing it"
+                            + ("" if node else " (node unknown)")),
+                   severity="critical",
+                   data={"recommendation": "kill", "container_id": container_id,
+                         "flight_id": info.get("flight_id"),
+                         "enforcement": node.spec.enforcement if node else "unknown"})
+        self.log_audit({"kind": "stale_container_recommendation",
+                        "container_id": container_id,
+                        "node_id": node.spec.id if node else None,
+                        "flight_id": info.get("flight_id")})
 
     def trend(self, node_id: str) -> dict:
         node = self.nodes.get(node_id)

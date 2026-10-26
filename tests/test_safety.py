@@ -51,9 +51,18 @@ def test_redline_kills():
     assert a.ladder == Ladder.KILL
 
 
-def test_unknown_node_kills():
+def test_an_offline_node_takes_no_new_work():
+    a = assess(node(status="offline"))
+    assert a.ladder == Ladder.DRAIN
+    assert "offline" in a.reason
+
+
+def test_unknown_node_drains_but_does_not_kill():
+    """Stale telemetry means the Tower cannot see the machine. The safe
+    answer is to stop adding work, not to reach in and kill what may be
+    perfectly healthy."""
     a = assess(node(status="unknown"))
-    assert a.ladder == Ladder.KILL
+    assert a.ladder == Ladder.DRAIN
     assert "unknown" in a.reason
 
 

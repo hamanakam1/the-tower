@@ -77,6 +77,13 @@
   down. It now takes the incumbent's node, and the preemption only happens
   when the newcomer actually fits there once the incumbent's weight is
   released; otherwise the request is queued and the incumbent keeps running.
+- **A silent container is a recommendation on an advisory node.** The
+  stale-container watchdog used to kill on every node and close the flight,
+  which freed capacity while an unowned process was still running. Killing
+  now needs an enforced node or a pid the Tower owns; otherwise the operator
+  is told once a minute.
+- **`unknown` and `offline` are the drain rung, not `kill`.** Stale telemetry
+  now means "stop adding work", not "terminate what the Tower cannot see".
 
 ### Reliability
 - **Telemetry rollup actually rolls up.** Every age band (1m, 5m, 1h, 1d) is
