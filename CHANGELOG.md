@@ -125,6 +125,18 @@
   ladder rung, and the number of active leases. Label values are escaped.
 - **`nodes_online` means reachable.** A node whose telemetry went stale is
   `unknown` and is no longer counted as online.
+- **The WebSocket is behind the token.** `TOWER_TOKEN` guarded mutating HTTP
+  methods but not `/ws`, which pushes the same airspace the REST API serves.
+  The socket is now checked before `accept`, the header comparison is
+  constant-time and requires the `Bearer` scheme, and a browser can pass the
+  token as `?token=`.
+- **A token-guarded Tower still has a dashboard.** Setting `TOWER_TOKEN` used
+  to leave every button doing nothing: the page never sent the token and
+  never said why. It now asks once, remembers it, retries the write and
+  reconnects the socket, and a rejected write is shown rather than logged.
+- **A dropped socket comes back.** The dashboard used to lose live updates
+  permanently after one disconnect while still looking live; it now
+  reconnects with backoff.
 
 ### Fixed
 - Fix audit id collision: `audit-<epoch-ms>` raised `UNIQUE constraint failed` on two entries in the same millisecond; now `audit-<epoch-ns>`

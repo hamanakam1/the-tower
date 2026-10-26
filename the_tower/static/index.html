@@ -219,12 +219,38 @@
 
 <script>
 const API = "";
+// The Tower can require a bearer token for anything that changes state. The
+// dashboard is the primary operator UI, so it has to be able to present one;
+// asking once and remembering it beats "the buttons silently do nothing".
+let TOKEN = localStorage.getItem("tower_token") || "";
 let state = null;
 let sweepAngle = 0;
 const blips = [];
 
+function authHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  if (TOKEN) h["Authorization"] = "Bearer " + TOKEN;
+  return h;
+}
+
 async function fetchJSON(path, opts) {
-  const r = await fetch(API + path, opts);
+  opts = opts || {};
+  const baseHeaders = opts.headers || {};
+  let r = await fetch(API + path, { ...opts, headers: authHeaders(baseHeaders) });
+  if (r.status === 401) {
+    const entered = prompt("This Tower requires an access token (TOWER_TOKEN):");
+    if (entered && entered.trim()) {
+      TOKEN = entered.trim();
+      localStorage.setItem("tower_token", TOKEN);
+      r = await fetch(API + path, { ...opts, headers: authHeaders(baseHeaders) });
+      if (typeof connectWS === "function") connectWS();
+    }
+  }
+  if (r.status === 401) {
+    TOKEN = "";
+    localStorage.removeItem("tower_token");
+    return { error: "unauthorized - this Tower needs a token" };
+  }
   return r.json();
 }
 
@@ -415,6 +441,7 @@ async function requestClearance() {
     weight: { cpu_cores: cpu, memory_gb: mem, duration_est_s: dur, network_mbps: 5, thermal_budget_c: 5 },
   };
   const r = await fetchJSON("/clearance", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  if (r && r.error) { alert(r.error); return; }
   console.log(r);
   await refresh();
 }
@@ -437,6 +464,7 @@ async function doKill() {
   const reason = document.getElementById("killReason").value.trim() || "manual kill";
   const drain = parseFloat(document.getElementById("killDrain").value) || 0;
   const r = await fetchJSON(`/kill/${encodeURIComponent(target)}`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({reason, drain_timeout_s: drain}) });
+  if (r && r.error) { alert(r.error); return; }
   console.log(r);
   if (r && r.message) console.log(r.message);
   await refresh();
@@ -507,19 +535,41 @@ drawRadar();
 
 setInterval(refresh, 5000);
 refresh();
-// WebSocket live push
-try {
+// WebSocket live push. A socket that drops — a restart, a laptop sleeping,
+// a token that was not known yet — must come back, or the page silently
+// stops updating while still looking alive.
+let ws = null;
+let wsAttempt = 0;
+let wsTimer = null;
+
+function connectWS() {
+  clearTimeout(wsTimer);
   const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(wsProto + "//" + location.host + "/ws");
+  try {
+    ws = new WebSocket(wsProto + "//" + location.host + "/ws"
+      + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : ""));
+  } catch (e) {
+    scheduleReconnect();
+    return;
+  }
+  ws.onopen = () => { wsAttempt = 0; };
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
       if (msg.type === "airspace") { state = msg.airspace; renderNodes(state.nodes); renderFlights(state.flights); renderStats(state.stats); renderNodeSelect(state.nodes); renderTrends(state.nodes); }
-      if (msg.type === "event") { /* prepend */ }
     } catch(e){}
   };
-  ws.onopen = () => { console.log("ws open"); };
-} catch(e){ console.warn("ws unavailable", e); }
+  ws.onclose = () => { scheduleReconnect(); };
+  ws.onerror = () => { try { ws.close(); } catch(e){} };
+}
+
+function scheduleReconnect() {
+  const delay = Math.min(30000, 1000 * Math.pow(2, wsAttempt++));
+  clearTimeout(wsTimer);
+  wsTimer = setTimeout(connectWS, delay);
+}
+
+connectWS();
 
 function tickClock(){ document.getElementById("clock").textContent = new Date().toLocaleTimeString(); }
 setInterval(tickClock,1000); tickClock();

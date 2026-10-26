@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 from pathlib import Path
 
@@ -66,6 +67,16 @@ def _container_json(info):
     return out
 
 
+def _bearer(headers) -> str:
+    """Extract the token from an `Authorization: Bearer <token>` header.
+
+    Strict on purpose: a bare token without the scheme is not a credential,
+    and accepting it would silently widen what counts as one.
+    """
+    scheme, _, value = headers.get("authorization", "").partition(" ")
+    return value.strip() if scheme.lower() == "bearer" else ""
+
+
 class TowerServer:
     def __init__(self, tower: Tower):
         self.tower = tower
@@ -93,6 +104,16 @@ class TowerServer:
         tower.subscribe_async(on_event)
 
         async def ws_handler(websocket: WebSocket):
+            # A WebSocket carries the same telemetry the REST API does, so it
+            # is behind the same token. Checked before accept: an unauthenticated
+            # client must not get a socket at all.
+            expected = os.environ.get("TOWER_TOKEN")
+            if expected:
+                supplied = (websocket.query_params.get("token")
+                            or _bearer(websocket.headers))
+                if not hmac.compare_digest(supplied, expected):
+                    await websocket.close(code=1008)
+                    return
             await websocket.accept()
             connections.add(websocket)
             try:
@@ -529,8 +550,7 @@ class TowerServer:
                         if b[1] > rate_limit:
                             return JSONResponse({"error": "rate limited"}, status_code=429)
                 if token and request.method in ("POST", "DELETE", "PUT", "PATCH"):
-                    auth = request.headers.get("authorization", "")
-                    if auth != f"Bearer {token}":
+                    if not hmac.compare_digest(_bearer(request.headers), token):
                         return JSONResponse({"error": "unauthorized"}, status_code=401)
                 return await call_next(request)
 

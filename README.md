@@ -115,13 +115,13 @@ same console on a narrow viewport:
 - **Draining** - A flight given a grace period enters `draining`, keeps its claim on the node, lands if it finishes in time and is terminated when the deadline passes
 - **Scope Conflicts** - Resource-key conflict detection with priority preemption
 - **Priority Dispatch Queue** - Queued flights re-dispatched when capacity frees
-- **Container Registry** - Heartbeat-based liveness with auto-kill on timeout
+- **Container Registry** - Heartbeat-based liveness; a silent container is killed where the Tower is allowed to act and reported once a minute where it is not
 - **Freshness** - Stale telemetry makes a node `unknown`, and unknown nodes are never scheduled onto
 - **Advisory Mode** - Per-node opt-in: the Tower recommends instead of acting
 - **Explainability** - Every clearance carries the node state it saw, the score of every candidate and a policy version — and can be replayed later
 - **Persistence** - SQLite-backed flights, events, telemetry, audit hash chain, versioned migrations, rolled-up telemetry
 - **Live Push** - WebSocket airspace broadcasts
-- **Auth** - Optional bearer token for mutating endpoints
+- **Auth** - Optional bearer token for every mutating endpoint and the WebSocket; the dashboard asks for it once and remembers it
 - **Metrics** - Prometheus `/metrics` endpoint
 - **Telemetry Agent** - `the-tower agent` pushes local node metrics
 - **Container** - Dockerfile for one-command deployment
