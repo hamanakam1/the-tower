@@ -320,6 +320,21 @@ class Tower:
                                severity="critical",
                                data={"drain": True})
 
+        # A drain exists to stop new work while the work in the air finishes.
+        # Once nothing is left on the node, it is no longer draining. Use
+        # `cordoned` to keep a node out of service indefinitely.
+        for node in self.nodes.values():
+            if (node.status == NodeStatus.DRAINING
+                    and not node.active_flights and not node.queued_flights):
+                node.status = NodeStatus.ONLINE
+                self._emit(EventKind.ANOMALY, node_id=node.spec.id,
+                           message=f"{node.spec.name} drained - back in service",
+                           severity="info", data={"state": "online"})
+                await self.log_audit_async({"kind": "node_state",
+                                            "node_id": node.spec.id,
+                                            "previous": "draining", "state": "online",
+                                            "reason": "drain complete"})
+
     async def _dispatch_queued(self):
         # The queued index keeps this proportional to the number of *waiting*
         # flights instead of the total flight history.

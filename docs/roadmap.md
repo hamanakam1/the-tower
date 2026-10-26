@@ -188,6 +188,12 @@ reports anything real reports a temperature it guessed.
   stayed on disk and the node came back on the next start, and its leases and
   queued flights were never released. Unregistering now deletes the spec and
   closes every claim the node held.
+- `radar.py` — every sweep recomputed a node's status from telemetry, so a
+  `cordoned`, `maintenance` or `draining` node silently went back into service
+  within five seconds. That is exactly the machine an operator had taken out
+  of the airspace on purpose, and it included the drain that precedes a kill.
+  Lifecycle states are now pinned against telemetry; a drain clears itself
+  only when the work in the air is gone, and `cordoned` never clears itself.
 
 > These fixes are in this branch (except the dependency declaration, which
 > landed in the `v0.3.0` tag), with regression tests in
@@ -219,7 +225,7 @@ what was intended.
 | 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
 | 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
 | 0.11 | Bounded rate-limit buckets, CORS allowlist | **done** | `server.py`; `TOWER_CORS_ORIGINS`, no wildcard default |
-| 0.12 | Fill the test gaps | **done** | 176 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability, metrics and onboarding |
+| 0.12 | Fill the test gaps | **done** | 181 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability, metrics and onboarding |
 | — | Graded safety ladder (§3.2) | **done** | `the_tower/safety.py`: admit → warn → throttle → drain → kill |
 | — | Pure decision core (§3.1) | **done** | `the_tower/policy.py`; the Tower drives it with a frozen snapshot |
 | — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`, advisory by default; the Tower recommends instead of acting |
@@ -250,6 +256,8 @@ Each one has a test.
 | A node with stale telemetry is not reported as online | `core.py::airspace` | `tests/test_metrics.py` |
 | A node id cannot forge a metric series | `metrics.py::_label` | `tests/test_metrics.py` |
 | Unregistering a node forgets it permanently and releases its claims | `core.py::unregister_node` | `tests/test_onboarding.py` |
+| A cordoned, draining or maintained node is never returned to service by telemetry | `radar.py::_status_for` | `tests/test_core.py` |
+| A fresh drain returns the node to service once the work in the air is gone | `core.py::_progress_flights` | `tests/test_core.py` |
 | A warming machine is not a thermal spike | `anomaly.py::detect_spike` | `tests/test_false_positives.py` |
 | The same condition is not reported on every sweep | `anomaly.py::_should_report` | `tests/test_false_positives.py` |
 | A node can join the mesh in one command | `agent.py::node_spec` | `tests/test_onboarding.py` |

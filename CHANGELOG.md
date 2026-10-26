@@ -68,6 +68,10 @@
   local level instead of all history, the same condition is held down for 60s,
   the simulated telemetry moves with thermal inertia, and the time-to-redline
   forecast is never negative.
+- **A lifecycle state is operator intent, not telemetry.** A `cordoned`,
+  `maintenance` or `draining` node is no longer returned to service by the
+  next sweep — including the drain that precedes a kill. A drain clears
+  itself once the work in the air is gone; `cordoned` never does.
 
 ### Reliability
 - **Telemetry rollup actually rolls up.** Every age band (1m, 5m, 1h, 1d) is

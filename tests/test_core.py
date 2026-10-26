@@ -249,3 +249,74 @@ async def test_node_registration(tower):
     assert "newnode" in tower.nodes
     assert tower.unregister_node("newnode") is True
     assert "newnode" not in tower.nodes
+
+
+# --------------------------------------------------------------------------
+# Node lifecycle states are operator intent, not telemetry
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_cordoned_node_stays_cordoned_through_a_sweep(tower):
+    from the_tower.schemas import NodeStatus
+
+    assert tower.set_node_state("pi-cluster", "cordoned") is True
+    await tower.radar.sweep_once()
+    assert tower.get_node("pi-cluster").status == NodeStatus.CORDONED
+
+
+@pytest.mark.asyncio
+async def test_telemetry_does_not_return_a_draining_node_to_service(tower):
+    from the_tower.schemas import NodeStatus, Telemetry, ThermalState
+
+    assert tower.set_node_state("m3max", "draining") is True
+    node = tower.get_node("m3max")
+    tower.ingest_telemetry("m3max", Telemetry(
+        node_id="m3max", timestamp=__import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc),
+        cpu_percent=5.0, memory_percent=10.0, memory_used_gb=2.0,
+        memory_total_gb=128.0, temperature_c=40.0, power_watts=10.0,
+        bandwidth_mbps=5.0, load_avg=1.0, thermal_state=ThermalState.NOMINAL))
+    assert node.status == NodeStatus.DRAINING
+
+
+@pytest.mark.asyncio
+async def test_a_stale_agent_node_is_unknown_and_recovers_when_it_reports(tower):
+    from datetime import datetime, timedelta, timezone
+
+    from the_tower.schemas import NodeSpec, NodeStatus, Telemetry, ThermalState
+
+    tower.register_node(NodeSpec(
+        id="pi-01", name="Pi", role="t", specs="x", constraints="y",
+        cpu_cores=4, memory_gb=8, redline_temp_c=80, max_power_watts=20,
+        network_capacity_mbps=100, sampler="agent", simulate=False,
+        staleness_budget_s=5))
+    node = tower.get_node("pi-01")
+    node.last_seen = datetime.now(timezone.utc) - timedelta(seconds=60)
+    await tower.radar.sweep_once()
+    assert node.status == NodeStatus.UNKNOWN
+
+    tower.ingest_telemetry("pi-01", Telemetry(
+        node_id="pi-01", timestamp=datetime.now(timezone.utc),
+        cpu_percent=5.0, memory_percent=10.0, memory_used_gb=1.0,
+        memory_total_gb=8.0, temperature_c=45.0, power_watts=5.0,
+        bandwidth_mbps=5.0, load_avg=0.5, thermal_state=ThermalState.NOMINAL))
+    assert node.status == NodeStatus.ONLINE
+
+
+@pytest.mark.asyncio
+async def test_a_finished_drain_returns_the_node_to_service(tower):
+    from the_tower.schemas import NodeStatus
+
+    tower.set_node_state("pi-cluster", "draining")
+    await tower._progress_flights()
+    assert tower.get_node("pi-cluster").status == NodeStatus.ONLINE
+
+
+@pytest.mark.asyncio
+async def test_a_cordoned_node_is_never_returned_to_service_automatically(tower):
+    from the_tower.schemas import NodeStatus
+
+    tower.set_node_state("pi-cluster", "cordoned")
+    await tower._progress_flights()
+    await tower.radar.sweep_once()
+    assert tower.get_node("pi-cluster").status == NodeStatus.CORDONED

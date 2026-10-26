@@ -17,6 +17,13 @@ import psutil
 from .schemas import Node, NodeSpec, Telemetry, ThermalState, NodeStatus
 from .sensors import read_temperature
 
+# States a sweep must not overwrite: they mean "a human (or a drain) decided
+# this node should not take work".
+_PINNED_STATUSES = {
+    NodeStatus.CORDONED, NodeStatus.MAINTENANCE,
+    NodeStatus.OFFLINE, NodeStatus.DRAINING,
+}
+
 
 def thermal_state_for(temp_c: float, redline: float) -> ThermalState:
     ratio = temp_c / redline
@@ -54,7 +61,7 @@ class RadarSweep:
                 # agent-managed node: never fabricate telemetry, only check
                 # that the agent is still alive
                 age = (datetime.now(timezone.utc) - node.last_seen).total_seconds()
-                if age > node.spec.staleness_budget_s:
+                if age > node.spec.staleness_budget_s and node.status not in _PINNED_STATUSES:
                     node.status = NodeStatus.UNKNOWN
                 out[nid] = node.telemetry
                 continue
@@ -76,6 +83,12 @@ class RadarSweep:
         return out
 
     def _status_for(self, node: Node, t: Telemetry) -> NodeStatus:
+        # Lifecycle states that an operator (or a drain) set on purpose are
+        # not telemetry. A sweep must never quietly return a cordoned or
+        # draining node to service: that is exactly the machine you took out
+        # of the airspace on purpose.
+        if node.status in _PINNED_STATUSES:
+            return node.status
         if t.thermal_state == ThermalState.CRITICAL:
             return NodeStatus.REDLINE
         if t.cpu_percent > 92 or t.memory_percent > 92:
