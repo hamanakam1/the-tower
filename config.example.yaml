@@ -21,7 +21,9 @@ nodes:
     location: local
     simulate: true          # set false once a node agent reports for this node
     staleness_budget_s: 30
-    enforcement: enforce    # advisory | enforce
+    # Advisory is the default posture: the Tower recommends, it does not act.
+    # Set to "enforce" only when you are ready for the Tower to kill on its own.
+    enforcement: advisory    # advisory | enforce
   - id: pi-cluster
     name: Raspberry Pi 5 Cluster
     role: Drone Swarm
@@ -37,7 +39,7 @@ nodes:
     location: edge
     simulate: true
     staleness_budget_s: 30
-    enforcement: enforce
+    enforcement: advisory
   - id: trailer-hpc
     name: Mobile HPC Trailer
     role: Off-grid Compute
@@ -53,4 +55,4 @@ nodes:
     location: off-grid
     simulate: true
     staleness_budget_s: 30
-    enforcement: enforce
+    enforcement: advisory

@@ -331,7 +331,12 @@ class TowerServer:
         async def set_enforcement(request):
             node_id = request.path_params["node_id"]
             body = await request.json()
-            mode = body.get("mode", "enforce")
+            # Acting on a node is an explicit opt-in: never infer "enforce"
+            # from a missing field.
+            mode = body.get("mode")
+            if mode not in ("advisory", "enforce"):
+                return JSONResponse(
+                    {"error": "mode must be 'advisory' or 'enforce'"}, status_code=400)
             ok = tower.set_enforcement(node_id, mode)
             if not ok:
                 return JSONResponse({"error": "node not found or bad mode"}, status_code=400)

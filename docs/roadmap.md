@@ -144,6 +144,20 @@ reports anything real reports a temperature it guessed.
 - `agent.py` — the agent pushed telemetry at a node id the Tower had never
   heard of and printed 404 forever. It can now register itself, describing
   the machine it is running on.
+- `schemas.py` / `config.example.yaml` — `NodeSpec.enforcement` defaulted to
+  `enforce`, and every node in the example config was `enforce`, while the
+  README, roadmap and CHANGELOG all promised that advisory was the default
+  and acting was an opt-in. The default is now `advisory` in the schema, in
+  `default_nodes()` and in `config.example.yaml`; a regression test forces a
+  redline on the default fleet and asserts nothing is killed.
+- `core.py` — with advisory as the real default, an advisory preemption left
+  the newcomer `cleared` into capacity the incumbent still held, which
+  overcommitted the node. The request is now queued and explained, the
+  recommendation is published once instead of on every sweep, and it resumes
+  by itself when the incumbent lands or the node is enforced.
+- `server.py` — `POST /nodes/:id/enforcement` defaulted a missing `mode` to
+  `enforce`. An omitted field now returns 400: switching a node to
+  enforcement must be explicit.
 
 > These fixes are in this branch (except the dependency declaration, which
 > landed in the `v0.3.0` tag), with regression tests in
@@ -175,10 +189,10 @@ what was intended.
 | 0.9 | Storage off the event loop | **done** | `core.py::_store` runs every write on a worker thread |
 | 0.10 | Telemetry freshness, `unknown` state | **done** | `NodeStatus.UNKNOWN`, `staleness_budget_s` |
 | 0.11 | Bounded rate-limit buckets, CORS allowlist | **done** | `server.py`; `TOWER_CORS_ORIGINS`, no wildcard default |
-| 0.12 | Fill the test gaps | **done** | 156 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability and onboarding |
+| 0.12 | Fill the test gaps | **done** | 161 tests across policy, safety, replay, config, sensors, storage, server, anomaly, kill authority, idempotency, replayability and onboarding |
 | — | Graded safety ladder (§3.2) | **done** | `the_tower/safety.py`: admit → warn → throttle → drain → kill |
 | — | Pure decision core (§3.1) | **done** | `the_tower/policy.py`; the Tower drives it with a frozen snapshot |
-| — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`; the Tower recommends instead of acting |
+| — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`, advisory by default; the Tower recommends instead of acting |
 | — | Decision replay (§3.1) | **done** | `the_tower/replay.py`; `POST /replay`, `GET /decisions` |
 | — | Node lifecycle states | **done** | draining / cordoned / maintenance / offline / unknown |
 | — | Leases | **done** | `core.py::issue_lease`; renewal, expiry and automatic rescheduling |
@@ -198,6 +212,8 @@ Each one has a test.
 | The time-to-redline forecast does not depend on the sweep interval | `anomaly.py::time_axis` | `tests/test_anomaly.py` |
 | A retried clearance request never schedules the work twice, even across a restart | `server.py::clearance_v2` | `tests/test_idempotency.py` |
 | Every clearance decision can be replayed from the Tower's own record | `core.py::replay_flight` | `tests/test_replayability.py` |
+| A fresh Tower advises; it never kills or preempts without an explicit opt-in | `schemas.py::NodeSpec.enforcement` | `tests/test_kill_authority.py` |
+| An advisory preemption never clears a flight into capacity the incumbent still holds | `core.py::_act_preempt` | `tests/test_kill_authority.py` |
 | A warming machine is not a thermal spike | `anomaly.py::detect_spike` | `tests/test_false_positives.py` |
 | The same condition is not reported on every sweep | `anomaly.py::_should_report` | `tests/test_false_positives.py` |
 | A node can join the mesh in one command | `agent.py::node_spec` | `tests/test_onboarding.py` |

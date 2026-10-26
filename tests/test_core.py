@@ -85,8 +85,29 @@ async def test_preemption(tower):
     f2 = Flight(task="high prio", scope=["r"], priority=FlightPriority.P0,
                 weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
     resp = await tower.request_clearance(ClearanceRequest(flight=f2))
+    # Advisory by default: the Tower recommends the preemption but will not
+    # clear the newcomer into capacity the incumbent still holds.
+    assert resp.decision.value == "queued"
+    assert tower.flights[f1.id].status.value == "in_flight"
+    assert tower.flights[f2.id].status.value == "queued"
+    assert "advisory" in resp.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_preemption_acts_when_the_node_is_enforced(tower):
+    from the_tower.schemas import Flight, ResourceWeight, ClearanceRequest, FlightPriority
+    for node in tower.nodes.values():
+        node.spec.enforcement = "enforce"
+    f1 = Flight(task="low prio", scope=["r"], priority=FlightPriority.P3,
+                weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=100))
+    await tower.request_clearance(ClearanceRequest(flight=f1))
+    assert f1.status.value == "in_flight"
+    f2 = Flight(task="high prio", scope=["r"], priority=FlightPriority.P0,
+                weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
+    resp = await tower.request_clearance(ClearanceRequest(flight=f2))
     assert resp.decision.value == "cleared"
     assert tower.flights[f1.id].status.value == "shot_down"
+    assert tower.flights[f2.id].status.value == "in_flight"
 
 
 @pytest.mark.asyncio

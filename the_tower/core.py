@@ -325,10 +325,35 @@ class Tower:
         for f in queued:
             if f.status != FlightStatus.QUEUED:
                 continue
+            if self._blocked_on_advisory_preempt(f):
+                # Re-asking every tick would republish the same recommendation
+                # forever. The blocker is re-checked each sweep, so the flight
+                # resumes as soon as the incumbent lands or the node is enforced.
+                continue
             try:
                 await self.request_clearance(ClearanceRequest(flight=f))
             except Exception as e:
                 logger.warning("dispatch error: %s", e)
+
+    def _blocked_on_advisory_preempt(self, flight: Flight) -> bool:
+        """True while a queued flight is waiting for an advisory preemption.
+
+        The block clears itself once the incumbent is gone or the node has been
+        switched to enforcement.
+        """
+        block = (flight.metadata or {}).get("advisory_preempt")
+        if not block:
+            return False
+        node = self.nodes.get(block.get("node")) if block.get("node") else None
+        target = self.flights.get(block.get("target"))
+        if node is not None and node.spec.enforcement == "enforce":
+            flight.metadata.pop("advisory_preempt", None)
+            return False
+        if target is None or target.status not in (FlightStatus.IN_FLIGHT,
+                                                   FlightStatus.DRAINING):
+            flight.metadata.pop("advisory_preempt", None)
+            return False
+        return True
 
     # ---------------- clearance ----------------
     def idempotent_result(self, key: str) -> Optional[Dict[str, Any]]:
@@ -432,7 +457,15 @@ class Tower:
                 return await self._act_shot_down(flight, decision, "rogue flight declared")
 
             if decision.preempt_flight_id:
-                await self._act_preempt(flight, decision)
+                displaced = await self._act_preempt(flight, decision)
+                if not displaced:
+                    # Advisory node: the incumbent still holds the capacity the
+                    # decision assumed. Clearing this flight would overcommit
+                    # the node, so it waits instead of flying.
+                    return await self._act_queued(
+                        flight, decision, snap,
+                        why=(f"advisory: recommended preempting "
+                             f"{decision.preempt_flight_id}, capacity not freed"))
 
             if decision.decision == ClearanceDecision.QUEUED:
                 return await self._act_queued(flight, decision, snap)
@@ -497,17 +530,28 @@ class Tower:
                                 assigned_node=node_id or decision.assigned_node,
                                 reason=flight.reason, admission=decision.to_dict())
 
-    async def _act_preempt(self, flight: Flight, decision: Decision):
-        """Preempt the incumbent, or recommend it if the node is advisory."""
+    async def _act_preempt(self, flight: Flight, decision: Decision) -> bool:
+        """Preempt the incumbent, or recommend it if the node is advisory.
+
+        Returns True when the incumbent was actually displaced. When it was
+        not, the caller must not clear the new flight: the capacity the
+        decision assumed is still held.
+        """
         existing = self.flights.get(decision.preempt_flight_id)
         target_node = self.nodes.get(existing.assigned_node) if existing else None
         enforcing = (target_node.spec.enforcement == "enforce") if target_node else True
         if enforcing:
             await self._preempt(decision.preempt_flight_id,
                                 f"preempted by {flight.callsign} (higher priority)")
-            return
+            return True
         # advisory mode: the Tower recommends, and records, but does not act
-        self._emit(EventKind.ANOMALY, node_id=decision.preempt_flight_id, flight_id=flight.id,
+        flight.metadata["advisory_preempt"] = {
+            "target": decision.preempt_flight_id,
+            "node": target_node.spec.id if target_node else None,
+        }
+        self._emit(EventKind.ANOMALY,
+                   node_id=target_node.spec.id if target_node else None,
+                   flight_id=flight.id,
                    message=(f"ADVISORY: would preempt {existing.callsign if existing else decision.preempt_flight_id} "
                             f"for {flight.callsign} - node is advisory-only"),
                    severity="warn",
@@ -516,13 +560,17 @@ class Tower:
             "kind": "preempt_recommendation", "flight_id": flight.id,
             "target": decision.preempt_flight_id, "enforcement": "advisory",
         })
+        return False
 
     async def _act_queued(self, flight: Flight, decision: Decision,
-                          snapshot: Optional[MeshSnapshot] = None) -> ClearanceResponse:
+                          snapshot: Optional[MeshSnapshot] = None,
+                          why: Optional[str] = None) -> ClearanceResponse:
         """Put a flight on the waiting list."""
+        reason = why or decision.reason
         flight.status = FlightStatus.QUEUED
         self._queued_ids.add(flight.id)
         flight.assigned_node = decision.assigned_node
+        flight.reason = reason
         if decision.assigned_node and decision.assigned_node in self.nodes:
             node = self.nodes[decision.assigned_node]
             if flight.id not in node.queued_flights:
@@ -530,19 +578,19 @@ class Tower:
         if self.storage is not None:
             await self._store(self.storage.upsert_flight, flight)
         self._emit(EventKind.CLEARANCE_DENIED, flight_id=flight.id,
-                   message=f"Denied/queued: {flight.callsign} - {decision.reason}",
+                   message=f"Denied/queued: {flight.callsign} - {reason}",
                    severity="warn")
         await self.log_audit_async({
             "kind": "clearance", "flight_id": flight.id, "callsign": flight.callsign,
-            "decision": decision.decision.value, "reason": decision.reason,
+            "decision": ClearanceDecision.QUEUED.value, "reason": reason,
             "admission": decision.to_dict(),
             # a queued decision is a decision too, and it must be replayable
             "flight": self.flight_record(flight),
             "snapshot": snapshot_to_dict(snapshot) if snapshot else None,
         })
-        return ClearanceResponse(decision=decision.decision, flight_id=flight.id,
+        return ClearanceResponse(decision=ClearanceDecision.QUEUED, flight_id=flight.id,
                                 assigned_node=decision.assigned_node,
-                                reason=decision.reason,
+                                reason=reason,
                                 estimated_wait_s=decision.estimated_wait_s,
                                 admission=decision.to_dict())
 

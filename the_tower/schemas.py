@@ -147,8 +147,9 @@ class NodeSpec(BaseModel):
                                   description="Temperature backend: 'psutil', 'osx-cpu-temp', "
                                               "'estimate', or null for auto")
     staleness_budget_s: int = Field(default=30, gt=0, description="Seconds before telemetry is considered stale")
-    enforcement: str = Field(default="enforce", pattern="^(advisory|enforce)$",
-                             description="'advisory' recommends but never kills; 'enforce' acts")
+    enforcement: str = Field(default="advisory", pattern="^(advisory|enforce)$",
+                             description="'advisory' recommends but never kills; 'enforce' acts. "
+                                         "Advisory is the default: acting on a node is opt-in.")
 
 
 class Node(BaseModel):
@@ -415,6 +416,7 @@ def default_nodes() -> List[NodeSpec]:
             thermal_mass=4.0,
             location="local",
             sampler="local",
+            enforcement="advisory",
         ),
         NodeSpec(
             id="pi-cluster",
@@ -430,6 +432,7 @@ def default_nodes() -> List[NodeSpec]:
             network_capacity_mbps=1000.0,
             thermal_mass=1.2,
             location="edge",
+            enforcement="advisory",
         ),
         NodeSpec(
             id="trailer-hpc",
@@ -445,5 +448,6 @@ def default_nodes() -> List[NodeSpec]:
             network_capacity_mbps=500.0,
             thermal_mass=3.0,
             location="off-grid",
+            enforcement="advisory",
         ),
     ]

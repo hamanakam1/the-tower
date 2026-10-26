@@ -45,10 +45,48 @@
 - 101 tests, up from 31
 
 ## Unreleased
+
+### Safety
+- **Advisory is finally the real default.** `NodeSpec.enforcement` defaulted to
+  `enforce`, and so did `default_nodes()` and `config.example.yaml`, while the
+  README and roadmap promised advisory. A fresh Tower now recommends kills and
+  preemptions and never acts until a node is explicitly put into `enforce`.
+- **Advisory preemption no longer overcommits a node.** When the Tower
+  recommends preempting an incumbent it cannot displace, the newcomer is
+  queued (and told why) instead of being cleared into capacity that is still
+  held. The recommendation is published once, not every sweep, and the flight
+  resumes when the incumbent lands.
+- **`POST /nodes/:id/enforcement` requires an explicit `mode`.** A missing
+  field used to mean `enforce`.
+- **Kill authority.** A kill only signals PIDs the Tower was explicitly given
+  ownership of; a numeric container id is never treated as a pid, PID 0/1 are
+  never claimed, and ownership survives a restart.
+- **`drain_timeout_s` is real.** A kill with a grace period puts the flight
+  into `DRAINING` with a persisted deadline; it lands if it finishes, and is
+  terminated at the deadline.
+- **The event log stops crying wolf.** Thermal spikes are measured against the
+  local level instead of all history, the same condition is held down for 60s,
+  the simulated telemetry moves with thermal inertia, and the time-to-redline
+  forecast is never negative.
+
+### Reliability
+- **Decisions are replayable.** Every clearance records the flight and the
+  mesh snapshot it was decided against (`GET /replay/flight/{id}`), including
+  queued decisions.
+- **Idempotency survives a restart.** The key and its answer are persisted
+  with the flight, so a retry after a restart cannot schedule the work twice.
+- **The forecast uses real timestamps.** The thermal regression no longer
+  assumes a five-second sweep interval.
+- **The agent can register itself.** `the-tower agent --register` describes
+  the machine it runs on and stops the Tower simulating that node.
+
+### Fixed
 - Fix audit id collision: `audit-<epoch-ms>` raised `UNIQUE constraint failed` on two entries in the same millisecond; now `audit-<epoch-ns>`
 - Fix audit chain ordering: second-resolution timestamps were ambiguous; the chain now follows insertion order
 - Fix storage thread affinity: the SQLite connection was bound to the constructing thread and raised `ProgrammingError` on any write from another thread; the connection is now shared under a lock
-- Add regression tests for the audit chain and storage thread safety
+- Update the dashboard screenshots and add regression tests for the audit chain, storage thread safety, kill authority, idempotency, replayability, false positives and onboarding
+
+### Docs
 - Add the long-term build plan (`docs/roadmap.md`), the proposed target architecture diagram (`docs/architecture/`) and dashboard screenshots (`docs/screenshots/`)
 
 ## 0.3.0

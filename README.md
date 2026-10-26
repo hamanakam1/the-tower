@@ -175,7 +175,7 @@ volume. See the [package on GitHub](https://github.com/hamanakam1/the-tower/pkgs
 - `POST /clearance/v2` - Idempotent clearance contract (202 Accepted)
 - `GET /decision/last` - The last admission decision, with its explainability block
 - `GET /safety/ladder` - Enforcement ladder state per node
-- `POST /nodes/:id/enforcement` - Switch a node between `advisory` and `enforce`
+- `POST /nodes/:id/enforcement` - Switch a node between `advisory` (the default) and `enforce`; `mode` is required
 - `GET /history/:node` - Recent telemetry samples for a node
 - `GET /rollup` - Rolled-up telemetry history
 - `GET /leases` - Active resource leases
@@ -230,7 +230,9 @@ nodes are still simulated, and macOS exposes no CPU thermal sensor through
 `psutil` — the local node's temperature is an estimate from CPU load, and the
 dashboard says so on every sample. The kill path only signals processes the
 Tower has been given ownership of, a kill needs a reason, and the audit chain
-records admission decisions. The
+records admission decisions. A fresh Tower is **advisory**: it recommends a
+kill or a preemption and never acts on its own until a node is explicitly put
+into `enforce` mode. The
 [long-term plan](docs/roadmap.md) lists every remaining gap with the horizon
 that closes it, and the guarantees that now hold are listed
 [there](docs/roadmap.md#the-guarantees-that-now-hold).

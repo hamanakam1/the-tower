@@ -232,3 +232,87 @@ async def test_the_drain_deadline_survives_a_restart(tmp_path):
     assert reloaded.status == FlightStatus.DRAINING
     assert reloaded.drain_until is not None
     await t2.stop()
+
+
+# --------------------------------------------------------------------------
+# Advisory by default
+#
+# README, the roadmap and the CHANGELOG all promise that a fresh Tower only
+# recommends, and that acting on a node is an explicit opt-in. A schema
+# default of "enforce" silently broke that promise for the built-in fleet
+# and for every config that did not spell the field out.
+# --------------------------------------------------------------------------
+
+def test_a_bare_node_spec_is_advisory():
+    from the_tower.schemas import NodeSpec
+
+    spec = NodeSpec(id="bare", name="Bare", role="test", specs="x", constraints="y",
+                    cpu_cores=4, memory_gb=8, redline_temp_c=90,
+                    max_power_watts=50, network_capacity_mbps=100)
+    assert spec.enforcement == "advisory"
+
+
+def test_the_default_fleet_is_advisory():
+    from the_tower.schemas import default_nodes
+
+    assert default_nodes(), "the default fleet must not be empty"
+    for spec in default_nodes():
+        assert spec.enforcement == "advisory", f"{spec.id} would act without an opt-in"
+
+
+@pytest.mark.asyncio
+async def test_a_redline_on_the_default_fleet_does_not_kill(tower):
+    """End to end: a default node at redline recommends a kill, never performs one."""
+    node = tower.get_node("m3max")
+    assert node.spec.enforcement == "advisory"
+    flight = Flight(task="melting", weight=ResourceWeight(cpu_cores=1, memory_gb=1,
+                                                          duration_est_s=600))
+    await tower.request_clearance(ClearanceRequest(flight=flight))
+    assert flight.status == FlightStatus.IN_FLIGHT
+
+    from the_tower.schemas import ThermalState
+    node.telemetry = node.telemetry.model_copy(update={
+        "temperature_c": node.spec.redline_temp_c + 5,
+        "thermal_state": ThermalState.CRITICAL,
+        "timestamp": datetime.now(timezone.utc)})
+    node.history.append(node.telemetry)
+
+    await tower._auto_kill_on_redline(node.id)
+
+    assert flight.status == FlightStatus.IN_FLIGHT
+    assert any("ADVISORY" in e.message for e in tower.events)
+    assert await tower.verify_audit_async() is True
+
+
+@pytest.mark.asyncio
+async def test_an_advisory_preemption_recommends_once_and_then_waits(tower):
+    """A queued flight must not republish the same recommendation every sweep,
+    and must fly once the incumbent lands."""
+    from the_tower.schemas import ClearanceRequest, FlightPriority
+
+    low = Flight(task="low", scope=["r"], priority=FlightPriority.P3,
+                 weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=100))
+    await tower.request_clearance(ClearanceRequest(flight=low))
+    high = Flight(task="high", scope=["r"], priority=FlightPriority.P0,
+                  weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
+    resp = await tower.request_clearance(ClearanceRequest(flight=high))
+    assert resp.decision.value == "queued"
+
+    def advice_count():
+        return sum("would preempt" in e.message for e in tower.events)
+
+    once = advice_count()
+    assert once == 1
+    for _ in range(3):
+        await tower._dispatch_queued()
+    assert advice_count() == once, "the same recommendation must not be republished"
+    assert high.status == FlightStatus.QUEUED
+
+    # the incumbent lands, the recommendation is satisfied, and the queued
+    # flight is dispatched on the next sweep
+    low.takeoff_at = low.takeoff_at.replace(year=2000)
+    await tower._progress_flights()
+    await tower._dispatch_queued()
+    assert high.status == FlightStatus.IN_FLIGHT
+
+
