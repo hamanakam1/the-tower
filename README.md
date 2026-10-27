@@ -91,6 +91,48 @@ same console on a narrow viewport:
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    subgraph Upstream["Upstream Intent"]
+        P["<b>Panther</b><br/><i>raw multimodal signals</i>"]
+        ED["<b>El Destilador</b><br/><i>distilled semantic intent</i>"]
+        EH["<b>El Hidratador</b><br/><i>stages execution DAG</i>"]
+        P --> ED --> EH
+    end
+
+    subgraph Tower["The Tower (Hardware Air Traffic Control)"]
+        direction TB
+        RADAR["<b>Radar Sweep</b><br/><i>5s node telemetry polling</i>"]
+        POLICY["<b>Pure Policy Core</b><br/><i>deterministic admission scoring</i>"]
+        SAFETY["<b>Safety Ladder</b><br/><i>admit • warn • throttle • drain • kill</i>"]
+        BATTERY["<b>Anti-Air Battery</b><br/><i>rogue container & runaway flight terminator</i>"]
+
+        RADAR --> POLICY
+        POLICY --> SAFETY
+        SAFETY --> BATTERY
+    end
+
+    subgraph Execution["Fleet Execution"]
+        TR["<b>Taskrivet Workers</b><br/><i>Docker execution sandboxes</i>"]
+        M3["<b>M3 Max</b><br/><i>heavy compute</i>"]
+        PI["<b>Pi 5 Swarm</b><br/><i>distributed drones</i>"]
+        TRV["<b>Trailer</b><br/><i>solar & battery</i>"]
+    end
+
+    subgraph Verification["Post-Flight Verification"]
+        EV["<b>El Verificador</b><br/><i>independent QA gate</i>"]
+        EC["<b>The Chronicler</b><br/><i>meta-learning & amnesia buster</i>"]
+        ER[("<b>EdgeRecord</b><br/><i>immutable audit ledger</i>")]
+        EV --> EC --> ER
+    end
+
+    EH -->|Clearance request| POLICY
+    POLICY -->|Cleared flight lease| TR
+    TR --> M3 & PI & TRV
+    M3 & PI & TRV -->|Heartbeats & thermals| RADAR
+    TR -->|Execution artifacts| EV
+```
+
 1. **Panther** → Captures raw multimodal signals
 2. **El Destilador** → Distills into semantic intent
 3. **Ticket Board [PRIVATE]** → Human roadmap (never read by Tower)
