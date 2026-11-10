@@ -115,9 +115,23 @@ def test_unregistering_a_node_forgets_it_and_its_claims(tmp_path):
         db = str(tmp_path / "tower.sqlite")
         t = Tower(db_path=db)
         await t.start()
+        # The radar samples the real host on its own schedule; stop it so a
+        # sweep cannot overwrite the telemetry pinned below mid-test.
+        await t.radar.stop()
+        # Park the seeded nodes near their redline so the freshly registered
+        # Pi is the only node worth clearing to. Pinning cpu/memory alone is
+        # not enough: score() also reads temperature_c and power_watts, which
+        # start() fills from this host's sensors. The winner would otherwise
+        # depend on how warm the machine running the test happens to be --
+        # which is exactly how this passed on a laptop and failed on CI.
         for n in t.nodes.values():
-            n.telemetry = n.telemetry.model_copy(update={"cpu_percent": 5.0,
-                                                         "memory_percent": 10.0})
+            n.telemetry = n.telemetry.model_copy(update={
+                "cpu_percent": 90.0,
+                "memory_percent": 90.0,
+                "temperature_c": n.spec.redline_temp_c * 0.95,
+                "power_watts": n.spec.max_power_watts * 0.9,
+                "gpu_percent": 90.0,
+            })
         spec = NodeSpec(id="pi-01", name="Pi", role="t", specs="x", constraints="y",
                         cpu_cores=4, memory_gb=8, redline_temp_c=80,
                         max_power_watts=20, network_capacity_mbps=100)

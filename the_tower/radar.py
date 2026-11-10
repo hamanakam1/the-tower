@@ -161,7 +161,11 @@ class RadarSweep:
         )
 
     def _sample_simulated(self, nid: str, node: Node, now: float) -> Telemetry:
-        phase = self._phase[nid]
+        # Nodes can be registered after the radar is built (the Tower shares
+        # this dict), so a node may have no phase yet. Give it one instead of
+        # raising: a KeyError here aborts the whole sweep, and every node's
+        # telemetry silently freezes until the process restarts.
+        phase = self._phase.setdefault(nid, random.random() * math.pi * 2)
         t = (now - self._t0) / 60.0  # minutes
         # base load varies by node, derived from the spec rather than a
         # hardcoded node id, so any node gets a plausible baseline.
