@@ -41,6 +41,12 @@ def build_parser():
     policy_parser.add_argument("--lint", action="store_true", help="Check the policy and exit")
     policy_parser.add_argument("--print", action="store_true", help="Print the policy as YAML")
 
+    verify_parser = sub.add_parser("verify", help="Check that the Tower is trustworthy")
+    verify_parser.add_argument("--db", default=None, help="SQLite db path to check")
+    verify_parser.add_argument("--config", default=None, help="YAML config file")
+    verify_parser.add_argument("--policy", default=None, help="YAML policy file")
+    verify_parser.add_argument("--json", action="store_true", help="Print the report as JSON")
+
     agent = sub.add_parser("agent", help="Run telemetry agent pushing local metrics to a Tower")
     agent.add_argument("--tower", default="http://127.0.0.1:8765")
     agent.add_argument("--node-id", default=None)
@@ -185,6 +191,26 @@ def cmd_policy(args):
     return 0
 
 
+async def cmd_verify(args):
+    from .config import load_config
+    from .rules import load_policy
+    from .verify import verify
+    cfg = load_config(args.config)
+    policy = load_policy(args.policy)
+    tower = Tower(nodes=cfg.nodes or None, radar_interval_s=cfg.radar_interval,
+                  db_path=args.db or cfg.db_path, policy=policy)
+    await tower.start()
+    try:
+        report = verify(tower)
+    finally:
+        await tower.stop()
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.render())
+    return 0 if report.ok else 1
+
+
 def main():
     args = build_parser().parse_args()
     if args.command == "serve":
@@ -199,6 +225,8 @@ def main():
         sys.exit(cmd_config(args))
     elif args.command == "policy":
         sys.exit(cmd_policy(args))
+    elif args.command == "verify":
+        sys.exit(asyncio.run(cmd_verify(args)))
     elif args.command == "agent":
         import platform
         node_id = args.node_id or platform.node()

@@ -265,6 +265,12 @@ class TowerServer:
         async def policy_info(request):
             return JSONResponse(tower.policy.as_dict())
 
+        async def verify_tower(request):
+            from .verify import verify
+            report = verify(tower)
+            return JSONResponse(report.to_dict(),
+                                status_code=200 if report.ok else 503)
+
         async def list_leases(request):
             leases = list(tower.leases.values())
             return JSONResponse({"leases": [l.model_dump(mode="json") for l in leases]})
@@ -499,6 +505,7 @@ class TowerServer:
             Route("/decision/last", last_decision),
             Route("/safety/ladder", safety_ladder),
             Route("/policy", policy_info),
+            Route("/verify", verify_tower),
             Route("/leases", list_leases, methods=["GET"]),
             Route("/leases/{lease_id}/renew", renew_lease, methods=["POST"]),
             Route("/leases/{lease_id}", release_lease, methods=["DELETE"]),
