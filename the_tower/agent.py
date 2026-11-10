@@ -4,12 +4,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import platform
+import signal
+from typing import Optional
 
 import httpx
 import psutil
 
 from .schemas import Telemetry, ThermalState
 from .sensors import read_temperature
+from .spool import Spool
 
 
 def sample(node_id: str, sensor: str = "") -> dict:
@@ -99,25 +102,68 @@ async def register(c: httpx.AsyncClient, tower_url: str, spec: dict, headers: di
     return False
 
 
+async def find_lease(c: httpx.AsyncClient, tower_url: str, node_id: str,
+                     headers: dict) -> str:
+    """Find the lease this node is holding, if any.
+
+    The Tower is the holder of the claim, so the agent asks the Tower which
+    lease is its own rather than being told.
+    """
+    try:
+        r = await c.get(f"{tower_url}/leases", headers=headers, timeout=10)
+        if r.status_code != 200:
+            return ""
+        for lease in r.json().get("leases", []):
+            if lease.get("node_id") == node_id and lease.get("status") == "active":
+                return lease.get("id", "")
+    except Exception:
+        pass
+    return ""
+
+
 async def run(tower_url: str, node_id: str, interval: float, token: str = "",
               sensor: str = "", lease_id: str = "", lease_ttl: float = 300.0,
               do_register: bool = False, redline: float = 85.0, role: str = "Mesh Node",
               location: str = "local", enforcement: str = "advisory",
-              staleness_s: int = 30):
+              staleness_s: int = 30, spool_path: str = "", discover_lease: bool = True,
+              stop_event: Optional[asyncio.Event] = None):
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    spool = Spool(spool_path) if spool_path else None
+    stop_event = stop_event or asyncio.Event()
+
     async with httpx.AsyncClient() as c:
         if do_register:
             await register(c, tower_url,
                            node_spec(node_id, redline, role, location, sensor,
                                      enforcement, staleness_s),
                            headers)
-        missing = 0
-        while True:
+        if not lease_id and discover_lease:
+            lease_id = await find_lease(c, tower_url, node_id, headers)
+            if lease_id:
+                print(f"[{node_id}] renewing lease {lease_id}")
+
+        async def deliver(payload: dict) -> bool:
             try:
-                payload = sample(node_id, sensor)
-                r = await c.post(f"{tower_url}/ingest/{node_id}", json=payload, headers=headers, timeout=10)
+                r = await c.post(f"{tower_url}/ingest/{node_id}", json=payload,
+                                 headers=headers, timeout=10)
+            except Exception:
+                return False
+            return r.status_code < 400
+
+        missing = 0
+        while not stop_event.is_set():
+            # deliver anything the spool is holding, oldest first
+            if spool is not None and spool.count():
+                delivered = spool.drain(lambda p: True, limit=200)
+                if delivered:
+                    print(f"[{node_id}] replayed {delivered} spooled sample(s)")
+
+            payload = sample(node_id, sensor)
+            try:
+                r = await c.post(f"{tower_url}/ingest/{node_id}", json=payload,
+                                 headers=headers, timeout=10)
                 if r.status_code == 404:
                     missing += 1
                     if missing == 1:
@@ -131,17 +177,40 @@ async def run(tower_url: str, node_id: str, interval: float, token: str = "",
                     print(f"[{node_id}] unauthorized: check the token")
                 else:
                     missing = 0
-                    print(f"[{node_id}] push {r.status_code} ({payload['source']} thermal)")
-                # renew the lease that holds this node's resources
-                if lease_id:
+            except Exception as e:
+                # the link is down: keep the sample for when it comes back
+                if spool is not None:
+                    spool.append(payload)
+                    print(f"[{node_id}] link down ({e}); spooled the sample")
+                else:
+                    print(f"[{node_id}] error: {e}")
+
+            # renew the lease that holds this node's resources
+            if lease_id:
+                try:
                     lr = await c.post(f"{tower_url}/leases/{lease_id}/renew",
                                       json={"ttl_s": lease_ttl}, headers=headers, timeout=10)
                     if lr.status_code != 200:
                         print(f"[{node_id}] lease renewal failed: {lr.status_code} {lr.text}")
                         lease_id = ""
-            except Exception as e:
-                print(f"[{node_id}] error: {e}")
-            await asyncio.sleep(interval)
+                except Exception:
+                    pass
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+        # graceful shutdown: give the claim back rather than letting it
+        # expire and leave the Tower guessing
+        if lease_id:
+            try:
+                await c.delete(f"{tower_url}/leases/{lease_id}", headers=headers, timeout=10)
+                print(f"[{node_id}] released lease {lease_id}")
+            except Exception:
+                pass
+    if spool is not None:
+        print(f"[{node_id}] spool holds {spool.count()} sample(s)")
 
 
 def main():
@@ -164,10 +233,26 @@ def main():
                    help="Whether the tower may act on this node on its own")
     p.add_argument("--staleness", type=int, default=30,
                    help="Seconds without telemetry before the node is unknown")
+    p.add_argument("--spool", default="",
+                   help="Path to an on-disk buffer for samples that could not be delivered")
+    p.add_argument("--no-discover-lease", action="store_true",
+                   help="Do not ask the tower which lease this node holds")
     args = p.parse_args()
-    asyncio.run(run(args.tower, args.node_id, args.interval, args.token, args.sensor,
-                    args.lease, args.lease_ttl, args.register, args.redline, args.role,
-                    args.location, args.enforcement, args.staleness))
+
+    async def _main():
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except (NotImplementedError, RuntimeError):
+                pass
+        await run(args.tower, args.node_id, args.interval, args.token, args.sensor,
+                  args.lease, args.lease_ttl, args.register, args.redline, args.role,
+                  args.location, args.enforcement, args.staleness, args.spool,
+                  not args.no_discover_lease, stop)
+
+    asyncio.run(_main())
 
 
 if __name__ == "__main__":
