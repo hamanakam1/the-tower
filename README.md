@@ -261,6 +261,8 @@ volume. See the [package on GitHub](https://github.com/hamanakam1/the-tower/pkgs
 - `POST /replay` - Re-derive a decision from its recorded snapshot
 - `GET /policy` - The admission rules in force
 - `GET /verify` - Self-check report (503 when something is wrong)
+- `GET /stop-orders/:node` - Stop orders for a node agent
+- `POST /stop-orders/:node/ack` - Acknowledge a stop order
 
 ## Adding a real node
 

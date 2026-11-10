@@ -224,6 +224,26 @@ def test_node_state_endpoint(client):
     assert r2.status_code == 400
 
 
+def test_kill_creates_a_stop_order(client):
+    r = client.post("/clearance", json={"task": "x", "container_id": "ctr-so",
+                                        "weight": {"cpu_cores": 1, "memory_gb": 1,
+                                                   "duration_est_s": 600}})
+    assert r.status_code == 200
+    fid = r.json()["flight_id"]
+    r2 = client.post("/kill/ctr-so", json={"reason": "test"})
+    assert r2.status_code == 200
+    node = "m3max"
+    r3 = client.get(f"/stop-orders/{node}")
+    assert r3.status_code == 200
+    orders = r3.json()["orders"]
+    assert any(o["flight_id"] == fid for o in orders)
+    # acknowledge
+    r4 = client.post(f"/stop-orders/{node}/ack", json={"flight_id": fid})
+    assert r4.status_code == 200
+    r5 = client.get(f"/stop-orders/{node}")
+    assert not any(o["flight_id"] == fid for o in r5.json()["orders"])
+
+
 def test_enforcement_endpoint_requires_an_explicit_mode(client):
     # A missing mode must not be read as "enforce".
     r = client.post("/nodes/m3max/enforcement", json={})
