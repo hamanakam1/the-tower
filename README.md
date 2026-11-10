@@ -140,6 +140,7 @@ flowchart TD
 - **Leases** - Time-bounded claims on node resources, with renewal, expiry and automatic rescheduling
 - **Node Lifecycle** - `online → draining → cordoned → maintenance → offline → unknown`
 - **Flight Clearance** - Dynamic dispatch algorithm based on resource weight and node scoring
+- **Predictive Admission** - A node that is forecast to hit its redline before the flight would land is refused, however much room it has right now
 - **Anomaly Radar** - Predictive ML on thermal/memory/power trends (linear regression + z-score spikes)
 - **Anti-Air Battery** - Kill console for runaway processes and stale containers; a kill requires a reason, only ever signals a process the Tower was given ownership of, and can give a flight a grace period to land before it is terminated
 - **Process Ownership** - The Tower keeps an explicit registry of the PIDs it may stop; a container id that merely looks like a PID is never treated as one

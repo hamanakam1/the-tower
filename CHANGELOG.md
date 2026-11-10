@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
+- **Predictive admission** — a node forecast to hit its redline before the
+  flight would land is refused, however much room it has now. The refusal is
+  explained per node in the decision's `admission` block.
 - **Self-verification** (`the-tower verify`, `GET /verify`) — an operator's
   check that the things the Tower relies on are working: the audit chain
   verifies, the schema matches the code, the policy is valid, every node is

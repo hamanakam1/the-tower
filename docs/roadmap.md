@@ -268,6 +268,8 @@ what was intended.
 | — | Hierarchical scope keys (1.6) | **done** | `the_tower/scopes.py`: paths with `read`/`write`/`intent` modes |
 | — | Declarative policy (2.1) | **done** | `the_tower/rules.py`: versioned YAML, a linter, and a policy fingerprint on every decision |
 | — | Agent spool and lease lifecycle (1.1) | **done** | `the_tower/spool.py`; the agent spools, discovers its lease and releases it on shutdown |
+| — | Predictive admission (Horizon 3) | **done** | a node forecast to hit redline before the flight lands is refused; per-node refusals are explained |
+| — | Operator self-check | **done** | `the-tower verify`, `GET /verify` |
 | — | Leases | **done** | `core.py::issue_lease`; renewal, expiry and automatic rescheduling |
 
 ### The guarantees that now hold
