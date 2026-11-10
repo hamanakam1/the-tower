@@ -103,6 +103,8 @@ class Tower:
         self._last_prune: float = 0.0
         # lease id -> Lease (the Tower's claims on node resources)
         self.leases: Dict[str, Lease] = {}
+        # node id -> pending stop orders (cross-node kill requests)
+        self.stop_orders: Dict[str, List[Dict[str, Any]]] = {}
         # Processes the Tower is allowed to stop. Only a PID that was
         # explicitly registered with the Tower ends up here, and nothing
         # else on the host is ever signalled.
@@ -863,6 +865,15 @@ class Tower:
                                         "reason": req.reason, "requester": req.requester,
                                         "draining": draining,
                                         "process_terminated": killed_proc})
+            # cross-node stop order: the flight's node agent is the one that
+            # can actually terminate the process on its own machine
+            flight = self.flights.get(flight_id) if flight_id else None
+            target_node = (flight.assigned_node if flight else None) or node_id
+            if target_node:
+                order = {"flight_id": flight_id, "container_id": req.container_id,
+                         "reason": req.reason,
+                         "created_at": datetime.now(timezone.utc).isoformat()}
+                self.stop_orders.setdefault(target_node, []).append(order)
             response = KillResponse(
                 success=True,
                 container_id=req.container_id,
@@ -962,6 +973,22 @@ class Tower:
                 lease.status = LeaseStatus.RELEASED
                 return lease
         return None
+
+    def pending_stop_orders(self, node_id: str) -> List[Dict[str, Any]]:
+        return list(self.stop_orders.get(node_id, []))
+
+    def acknowledge_stop_order(self, node_id: str, flight_id: Optional[str]) -> bool:
+        orders = self.stop_orders.get(node_id)
+        if not orders:
+            return False
+        kept = [o for o in orders if o.get("flight_id") != flight_id]
+        changed = len(kept) != len(orders)
+        if changed:
+            if kept:
+                self.stop_orders[node_id] = kept
+            else:
+                self.stop_orders.pop(node_id, None)
+        return changed
 
     def expired_leases(self) -> List[Lease]:
         now = datetime.now(timezone.utc)

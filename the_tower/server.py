@@ -262,6 +262,16 @@ class TowerServer:
         async def safety_ladder(request):
             return JSONResponse(tower.ladder())
 
+        async def stop_orders(request):
+            node_id = request.path_params["node_id"]
+            return JSONResponse({"orders": tower.pending_stop_orders(node_id)})
+
+        async def ack_stop_order(request):
+            node_id = request.path_params["node_id"]
+            body = await request.json()
+            tower.acknowledge_stop_order(node_id, body.get("flight_id"))
+            return JSONResponse({"ok": True})
+
         async def policy_info(request):
             return JSONResponse(tower.policy.as_dict())
 
@@ -504,6 +514,8 @@ class TowerServer:
             Route("/clearance/v2", clearance_v2, methods=["POST"]),
             Route("/decision/last", last_decision),
             Route("/safety/ladder", safety_ladder),
+            Route("/stop-orders/{node_id}", stop_orders, methods=["GET"]),
+            Route("/stop-orders/{node_id}/ack", ack_stop_order, methods=["POST"]),
             Route("/policy", policy_info),
             Route("/verify", verify_tower),
             Route("/leases", list_leases, methods=["GET"]),
