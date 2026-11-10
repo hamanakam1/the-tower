@@ -155,7 +155,22 @@ flowchart TD
 - **Anti-Air Battery** - Kill console for runaway processes and stale containers; a kill requires a reason, only ever signals a process the Tower was given ownership of, and can give a flight a grace period to land before it is terminated
 - **Process Ownership** - The Tower keeps an explicit registry of the PIDs it may stop; a container id that merely looks like a PID is never treated as one
 - **Draining** - A flight given a grace period enters `draining`, keeps its claim on the node, lands if it finishes in time and is terminated when the deadline passes
-- **Scope Conflicts** - Resource-key conflict detection with priority preemption
+- **Scope Conflicts** - Hierarchical resource keys with `read`/`write`/`intent` modes and priority preemption
+
+### Scope keys
+
+A scope key names a resource in the mesh and says how the flight touches it:
+
+```text
+data/train:read      look at the training data
+data/train:write     modify the training data
+model/lora:intent    declare an intent to write the adapter
+```
+
+Keys are hierarchical, so `model/lora` covers `model/lora/v2` but not
+`model/lora-adapters`. Two readers never conflict. A reader and a writer do.
+An `intent` conflicts with everything that touches the same subtree,
+including another `intent`.
 - **Priority Dispatch Queue** - Queued flights re-dispatched when capacity frees
 - **Container Registry** - Heartbeat-based liveness; a silent container is killed where the Tower is allowed to act and reported once a minute where it is not
 - **Freshness** - Stale telemetry makes a node `unknown`, and unknown nodes are never scheduled onto

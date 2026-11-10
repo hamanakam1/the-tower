@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+- **Hierarchical scope keys** (`the_tower/scopes.py`) — scope claims are
+  resource paths (`model/lora/v2`) with an access mode (`read`, `write`,
+  `intent`). Two readers never conflict; a reader and a writer do; a parent
+  path covers its children; an `intent` conflicts with everything that
+  touches the same subtree.
+
 ## 0.4.0
 
 ### Admission
