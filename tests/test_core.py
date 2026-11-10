@@ -259,6 +259,55 @@ async def test_set_enforcement(tower):
 
 
 @pytest.mark.asyncio
+async def test_two_readers_of_the_same_scope_both_fly(tower):
+    from the_tower.schemas import Flight, ResourceWeight, ClearanceRequest
+    a = Flight(task="reader a", scope=["data/train:read"],
+               weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=600))
+    b = Flight(task="reader b", scope=["data/train:read"],
+               weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=600))
+    await tower.request_clearance(ClearanceRequest(flight=a))
+    resp = await tower.request_clearance(ClearanceRequest(flight=b))
+    assert resp.decision.value == "cleared"
+
+
+@pytest.mark.asyncio
+async def test_writer_conflicts_with_a_reader(tower):
+    from the_tower.schemas import Flight, ResourceWeight, ClearanceRequest
+    reader = Flight(task="reader", scope=["data/train:read"],
+                    weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=600))
+    await tower.request_clearance(ClearanceRequest(flight=reader))
+    writer = Flight(task="writer", scope=["data/train:write"],
+                    weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
+    resp = await tower.request_clearance(ClearanceRequest(flight=writer))
+    assert resp.decision.value == "queued"
+    assert "scope conflict" in resp.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_parent_child_scope_conflict(tower):
+    from the_tower.schemas import Flight, ResourceWeight, ClearanceRequest
+    parent = Flight(task="parent", scope=["model/lora"],
+                    weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=600))
+    await tower.request_clearance(ClearanceRequest(flight=parent))
+    child = Flight(task="child", scope=["model/lora/v2"],
+                   weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
+    resp = await tower.request_clearance(ClearanceRequest(flight=child))
+    assert resp.decision.value == "queued"
+
+
+@pytest.mark.asyncio
+async def test_sibling_prefix_does_not_conflict(tower):
+    from the_tower.schemas import Flight, ResourceWeight, ClearanceRequest
+    a = Flight(task="a", scope=["model/lora"],
+               weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=600))
+    await tower.request_clearance(ClearanceRequest(flight=a))
+    b = Flight(task="b", scope=["model/lora-adapters"],
+               weight=ResourceWeight(cpu_cores=1, memory_gb=1, duration_est_s=5))
+    resp = await tower.request_clearance(ClearanceRequest(flight=b))
+    assert resp.decision.value == "cleared"
+
+
+@pytest.mark.asyncio
 async def test_node_registration(tower):
     from the_tower.schemas import NodeSpec
     spec = NodeSpec(id="newnode", name="New Node", role="test", specs="x", constraints="y",

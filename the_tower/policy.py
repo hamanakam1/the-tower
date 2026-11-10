@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .schemas import (
     ClearanceDecision, Flight, FlightPriority, FlightStatus, NodeStatus,
@@ -123,6 +123,13 @@ class ScopeView:
     cpu_cores: float = 0.0
     memory_gb: float = 0.0
     gpu_units: float = 0.0
+    claims: Tuple = ()  # parsed ScopeClaim objects
+
+    def parsed(self):
+        from .scopes import parse_claims
+        if self.claims:
+            return list(self.claims)
+        return parse_claims(self.scope)
 
 
 @dataclass(frozen=True)
@@ -139,12 +146,23 @@ class MeshSnapshot:
         return None
 
     def scope_conflict(self, flight: Flight) -> Optional[ScopeView]:
-        """First in-flight flight sharing a scope key with `flight`."""
+        """First in-flight flight that conflicts with `flight` over scope.
+
+        Conflict is mode-aware and hierarchical: two readers never conflict,
+        a reader and a writer do, and a claim on `model/lora` covers
+        `model/lora/v2`.
+        """
         if not flight.scope:
             return None
-        keys = set(flight.scope)
+        from .scopes import find_conflict, parse_claims
+        mine = parse_claims(flight.scope)
+        if not mine:
+            return None
         for f in self.in_flight:
-            if keys & set(f.scope):
+            theirs = f.parsed()
+            if not theirs:
+                continue
+            if find_conflict(mine, theirs):
                 return f
         return None
 

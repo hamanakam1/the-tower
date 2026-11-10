@@ -24,6 +24,7 @@ from .storage import Storage
 from .policy import MeshSnapshot, NodeView, ScopeView, Decision, decide, POLICY_VERSION
 from .safety import Ladder, assess, throttled_weight, THROTTLE_FACTOR, ladder_summary
 from .replay import snapshot_to_dict, snapshot_from_dict, replay, compare
+from .scopes import expand_hierarchy, parse_claims, normalise
 import logging
 
 logger = logging.getLogger("the_tower")
@@ -469,6 +470,7 @@ class Tower:
                     cpu_cores=f.weight.cpu_cores,
                     memory_gb=f.weight.memory_gb,
                     gpu_units=f.weight.gpu_units,
+                    claims=tuple(parse_claims(f.scope)),
                 ))
         return MeshSnapshot(nodes=nodes, in_flight=in_flight,
                             queued_count=len(self._queued_ids))
@@ -1096,36 +1098,47 @@ class Tower:
 
     # ---------------- conflict detection ----------------
     def scope_conflict(self, flight: Flight) -> Optional[str]:
-        """Return the id of an in-flight flight that shares a scope key.
+        """Return the id of an in-flight flight that conflicts over scope.
 
-        Uses the scope index rather than scanning every flight, so the cost
-        is proportional to the number of *conflicting* flights, not to the
-        size of the flight history.
+        The scope index is keyed by every ancestor path of every claim, so a
+        claim on `model/lora/v2` is found by a conflicting claim on
+        `model/lora`, and vice versa. The cost is proportional to the number
+        of *conflicting* flights, not to the size of the flight history.
         """
         if not flight.scope:
             return None
-        for key in flight.scope:
+        from .scopes import find_conflict, parse_claims
+        mine = parse_claims(flight.scope)
+        if not mine:
+            return None
+        seen = set()
+        for key in expand_hierarchy([c.path for c in mine]):
             for fid in self._scope_index.get(key, ()):  # usually 0 or 1 entries
+                if fid in seen:
+                    continue
+                seen.add(fid)
                 f = self.flights.get(fid)
-                if f is None:
+                if f is None or f.status != FlightStatus.IN_FLIGHT:
                     continue
-                if f.status != FlightStatus.IN_FLIGHT:
-                    continue
-                if set(f.scope) & set(flight.scope):
+                if find_conflict(mine, parse_claims(f.scope)):
                     return fid
         return None
 
     def _index_scope(self, flight: Flight):
-        for key in flight.scope:
-            bucket = self._scope_index.setdefault(key, [])
-            if flight.id not in bucket:
-                bucket.append(flight.id)
+        from .scopes import parse_claims
+        for claim in parse_claims(flight.scope):
+            for key in expand_hierarchy([claim.path]):
+                bucket = self._scope_index.setdefault(key, [])
+                if flight.id not in bucket:
+                    bucket.append(flight.id)
 
     def _deindex_scope(self, flight: Flight):
-        for key in flight.scope:
-            bucket = self._scope_index.get(key)
-            if bucket and flight.id in bucket:
-                bucket.remove(flight.id)
+        from .scopes import parse_claims
+        for claim in parse_claims(flight.scope):
+            for key in expand_hierarchy([claim.path]):
+                bucket = self._scope_index.get(key)
+                if bucket and flight.id in bucket:
+                    bucket.remove(flight.id)
 
     async def _preempt(self, flight_id: str, reason: str):
         f = self.flights.get(flight_id)
