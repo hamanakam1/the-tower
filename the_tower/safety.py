@@ -61,11 +61,13 @@ class Assessment:
 
 
 def assess(node: NodeView, flight: Optional[Flight] = None,
-           predicted_redline_in_s: Optional[float] = None) -> Assessment:
+           predicted_redline_in_s: Optional[float] = None, policy=None) -> Assessment:
     """Place a node on the enforcement ladder.
 
     Pure: no I/O, no clock, no mutation.
     """
+    from .rules import DEFAULT_POLICY
+    rules = (policy or DEFAULT_POLICY).ladder
     metrics: Dict[str, Any] = {
         "temp_c": node.temperature_c,
         "redline_c": node.redline_temp_c,
@@ -100,7 +102,7 @@ def assess(node: NodeView, flight: Optional[Flight] = None,
 
     # 2. Drain: the node is heading for redline. Stop admitting new work and
     #    let what is running finish on its own.
-    if predicted_redline_in_s is not None and predicted_redline_in_s < 120:
+    if predicted_redline_in_s is not None and predicted_redline_in_s < rules.drain_eta_seconds:
         return Assessment(Ladder.DRAIN,
                           f"predicted redline in {int(predicted_redline_in_s)}s - draining",
                           severity="warn", headroom_c=headroom,
@@ -114,7 +116,8 @@ def assess(node: NodeView, flight: Optional[Flight] = None,
                           severity="warn", headroom_c=headroom,
                           thermal_state=node.thermal_state,
                           predicted_redline_in_s=predicted_redline_in_s, metrics=metrics)
-    if node.cpu_percent >= 90 or node.memory_percent >= 90:
+    if (node.cpu_percent >= rules.throttle_cpu_percent or
+            node.memory_percent >= rules.throttle_memory_percent):
         return Assessment(Ladder.THROTTLE,
                           f"node saturated (cpu {node.cpu_percent:.0f}% / mem {node.memory_percent:.0f}%) - throttling",
                           severity="warn", headroom_c=headroom,
@@ -122,7 +125,7 @@ def assess(node: NodeView, flight: Optional[Flight] = None,
                           predicted_redline_in_s=predicted_redline_in_s, metrics=metrics)
 
     # 4. Warn: still fine, but worth telling the operator.
-    if node.thermal_state == ThermalState.FAIR.value or headroom < 12.0:
+    if node.thermal_state == ThermalState.FAIR.value or headroom < rules.warn_headroom_c:
         return Assessment(Ladder.WARN,
                           f"thermal headroom low ({headroom:.1f}C)",
                           severity="info", headroom_c=headroom,

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional
 
@@ -42,8 +43,10 @@ class Tower:
     """Hardware ATC controller."""
 
     def __init__(self, nodes: Optional[List[NodeSpec]] = None, radar_interval_s: float = 5.0,
-                 max_events: int = 500, db_path: Optional[str] = None):
+                 max_events: int = 500, db_path: Optional[str] = None, policy=None):
         self.db_path = db_path
+        from .rules import DEFAULT_POLICY
+        self.policy = policy or DEFAULT_POLICY
         self.storage: Optional[Storage] = Storage(db_path) if db_path else None
         # load node specs from storage if present
         if nodes is None and self.storage is not None:
@@ -255,14 +258,14 @@ class Tower:
                 node.active_flights = [f for f in node.active_flights if f != fid]
                 node.active_weights.pop(fid, None)
                 self._deindex_scope(flight)
-                if flight.retries < flight.max_retries:
+                if flight.retries < self.policy.max_retries:
                     flight.retries += 1
                     flight.status = FlightStatus.QUEUED
                     self._queued_ids.add(fid)
                     flight.assigned_node = None
                     flight.takeoff_at = None
                     flight.cleared_at = None
-                    flight.reason = f"retry {flight.retries}/{flight.max_retries}: node redline breach"
+                    flight.reason = f"retry {flight.retries}/{self.policy.max_retries}: node redline breach"
                 else:
                     flight.status = FlightStatus.SHOT_DOWN
                     self._queued_ids.discard(fid)
@@ -494,7 +497,10 @@ class Tower:
 
             # --- PURE: decide from a frozen snapshot ---
             snap = self.snapshot()
-            decision = decide(flight, snap)
+            decision = decide(flight, snap, self.policy)
+            # stamp the decision with the rules it was made under
+            decision = replace(decision, policy_version=self.policy.version,
+                               policy_fingerprint=self.policy.fingerprint())
             self._last_decision = decision
 
             # --- IMPURE: act on the decision ---
@@ -656,7 +662,7 @@ class Tower:
         if view is None:
             return None, Ladder.ADMIT
         predicted = self.anomaly.trend_summary(node).get("secs_to_redline")
-        assessment = assess(view, flight, predicted)
+        assessment = assess(view, flight, predicted, self.policy)
         self._node_ladder[node.spec.id] = assessment
 
         if assessment.ladder in (Ladder.WARN, Ladder.THROTTLE, Ladder.DRAIN):
@@ -691,7 +697,7 @@ class Tower:
                        severity="warn", data=assessment.to_dict())
 
         if assessment.ladder == Ladder.THROTTLE:
-            factor = THROTTLE_FACTOR.get(Ladder.THROTTLE, 0.5)
+            factor = self.policy.ladder.throttle_cpu_factor
             throttled = throttled_weight(flight, factor)
             flight.weight = throttled.weight
             flight.metadata = {**flight.metadata, "throttled": True,
@@ -713,7 +719,8 @@ class Tower:
             if flight.id in node.queued_flights:
                 node.queued_flights = [f for f in node.queued_flights if f != flight.id]
         # the flight holds a time-bounded claim on the node's resources
-        lease = self.issue_lease(flight, decision.assigned_node)
+        lease = self.issue_lease(flight, decision.assigned_node,
+                                 ttl_s=self.policy.leases.default_ttl_s)
         if lease is not None:
             self._emit(EventKind.LEASE, node_id=decision.assigned_node,
                        flight_id=flight.id,
@@ -970,14 +977,14 @@ class Tower:
                 node.active_weights.pop(lease.flight_id, None)
             flight = self.flights.get(lease.flight_id)
             if flight is not None and flight.status == FlightStatus.IN_FLIGHT:
-                if flight.retries < flight.max_retries:
+                if flight.retries < self.policy.max_retries:
                     flight.retries += 1
                     flight.status = FlightStatus.QUEUED
                     self._queued_ids.add(flight.id)
                     flight.assigned_node = None
                     flight.takeoff_at = None
                     flight.cleared_at = None
-                    flight.reason = f"lease expired, rescheduling (retry {flight.retries}/{flight.max_retries})"
+                    flight.reason = f"lease expired, rescheduling (retry {flight.retries}/{self.policy.max_retries})"
                 else:
                     flight.status = FlightStatus.SHOT_DOWN
                     flight.shot_down_at = datetime.now(timezone.utc)

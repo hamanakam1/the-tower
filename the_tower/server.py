@@ -262,6 +262,9 @@ class TowerServer:
         async def safety_ladder(request):
             return JSONResponse(tower.ladder())
 
+        async def policy_info(request):
+            return JSONResponse(tower.policy.as_dict())
+
         async def list_leases(request):
             leases = list(tower.leases.values())
             return JSONResponse({"leases": [l.model_dump(mode="json") for l in leases]})
@@ -495,6 +498,7 @@ class TowerServer:
             Route("/clearance/v2", clearance_v2, methods=["POST"]),
             Route("/decision/last", last_decision),
             Route("/safety/ladder", safety_ladder),
+            Route("/policy", policy_info),
             Route("/leases", list_leases, methods=["GET"]),
             Route("/leases/{lease_id}/renew", renew_lease, methods=["POST"]),
             Route("/leases/{lease_id}", release_lease, methods=["DELETE"]),

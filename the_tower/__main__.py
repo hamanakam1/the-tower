@@ -22,6 +22,7 @@ def build_parser():
     serve.add_argument("--interval", type=float, default=5.0, help="Radar sweep interval seconds")
     serve.add_argument("--db", default=None, help="SQLite db path")
     serve.add_argument("--config", default=None, help="YAML config file")
+    serve.add_argument("--policy", default=None, help="YAML admission policy file")
 
     radar = sub.add_parser("radar", help="Print one radar sweep and exit")
     status = sub.add_parser("status", help="Print node status")
@@ -34,6 +35,11 @@ def build_parser():
 
     config_parser = sub.add_parser("config", help="Show the effective configuration")
     config_parser.add_argument("--config", default=None, help="YAML config file")
+
+    policy_parser = sub.add_parser("policy", help="Show or lint the admission policy")
+    policy_parser.add_argument("--policy", default=None, help="YAML policy file")
+    policy_parser.add_argument("--lint", action="store_true", help="Check the policy and exit")
+    policy_parser.add_argument("--print", action="store_true", help="Print the policy as YAML")
 
     agent = sub.add_parser("agent", help="Run telemetry agent pushing local metrics to a Tower")
     agent.add_argument("--tower", default="http://127.0.0.1:8765")
@@ -67,7 +73,9 @@ async def cmd_serve(args):
     db_path = args.db or cfg.db_path
     interval = args.interval if args.interval != 5.0 else cfg.radar_interval
     nodes = cfg.nodes or None
-    tower = Tower(nodes=nodes, radar_interval_s=interval, db_path=db_path)
+    from .rules import load_policy
+    policy = load_policy(args.policy)
+    tower = Tower(nodes=nodes, radar_interval_s=interval, db_path=db_path, policy=policy)
     await tower.start()
     srv = TowerServer(tower)
     # run uvicorn in same loop
@@ -139,6 +147,40 @@ def cmd_config(args):
     return 0
 
 
+def cmd_policy(args):
+    from .rules import load_policy, lint, dump_policy, PolicyError
+    if args.lint:
+        import yaml
+        path = args.policy
+        if not path:
+            print("nothing to lint: no --policy file given", file=sys.stderr)
+            return 1
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            print(f"policy file not found: {path}", file=sys.stderr)
+            return 1
+        problems = lint(data)
+        if problems:
+            for p in problems:
+                print(f"  ✗ {p}", file=sys.stderr)
+            return 1
+        print(f"policy {path} is valid")
+        return 0
+    try:
+        policy = load_policy(args.policy)
+    except PolicyError as e:
+        print(f"invalid policy: {e}", file=sys.stderr)
+        return 1
+    if args.print:
+        print(dump_policy(policy))
+        return 0
+    print(json.dumps(policy.as_dict(), indent=2))
+    print(f"\nfingerprint: {policy.fingerprint()}")
+    return 0
+
+
 def main():
     args = build_parser().parse_args()
     if args.command == "serve":
@@ -151,6 +193,8 @@ def main():
         asyncio.run(cmd_demo(args))
     elif args.command == "config":
         sys.exit(cmd_config(args))
+    elif args.command == "policy":
+        sys.exit(cmd_policy(args))
     elif args.command == "agent":
         import platform
         node_id = args.node_id or platform.node()

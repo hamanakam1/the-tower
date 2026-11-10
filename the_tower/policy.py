@@ -88,16 +88,18 @@ class NodeView:
             return False
         return True
 
-    def score(self, flight: Flight) -> float:
+    def score(self, flight: Flight, policy=None) -> float:
         """Higher is better. Blends thermal, load, memory and power headroom."""
+        from .rules import DEFAULT_POLICY
+        w = (policy or DEFAULT_POLICY).scoring
         free = self.free()
         temp_headroom = (self.redline_temp_c - self.temperature_c) / self.redline_temp_c
         load_factor = 1.0 - (self.cpu_percent / 100.0)
         mem_factor = free["memory_gb"] / self.memory_gb if self.memory_gb else 0.0
         power_headroom = 1.0 - (self.power_watts / self.max_power_watts)
-        priority_boost = (4 - int(flight.priority)) * 0.05
-        return (temp_headroom * 0.35 + load_factor * 0.25 + mem_factor * 0.25 +
-                power_headroom * 0.15 + priority_boost)
+        priority_boost = (4 - int(flight.priority)) * w.priority
+        return (temp_headroom * w.thermal + load_factor * w.load + mem_factor * w.memory +
+                power_headroom * w.power + priority_boost)
 
     def state_at_decision(self) -> Dict[str, Any]:
         return {
@@ -179,6 +181,7 @@ class Decision:
     assigned_node: Optional[str] = None
     estimated_wait_s: Optional[float] = None
     policy_version: str = POLICY_VERSION
+    policy_fingerprint: str = ""
     scored: Dict[str, float] = field(default_factory=dict)
     node_state_at_decision: Dict[str, Any] = field(default_factory=dict)
     scope_conflict: Optional[str] = None
@@ -188,6 +191,7 @@ class Decision:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "policy_version": self.policy_version,
+            "policy_fingerprint": self.policy_fingerprint,
             "decision": self.decision.value,
             "assigned_node": self.assigned_node,
             "reason": self.reason,
@@ -203,12 +207,14 @@ class Decision:
 # The pure decision function
 # ============================================================================
 
-def decide(flight: Flight, snapshot: MeshSnapshot) -> Decision:
+def decide(flight: Flight, snapshot: MeshSnapshot, policy=None) -> Decision:
     """Decide whether `flight` may run, and where.
 
     Pure: no I/O, no clock, no mutation. The same inputs always produce the
     same decision.
     """
+    from .rules import DEFAULT_POLICY
+    policy = policy or DEFAULT_POLICY
     # 1. A flight declared rogue is shot down on approach, before it is ever
     #    placed in the airspace.
     if flight.rogue:
@@ -262,7 +268,7 @@ def decide(flight: Flight, snapshot: MeshSnapshot) -> Decision:
         considered.append(n.id)
         if not n.accepts(flight.weight):
             continue
-        s = n.score(flight)
+        s = n.score(flight, policy)
         scored[n.id] = round(s, 6)
         candidates.append(n)
 

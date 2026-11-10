@@ -1,0 +1,48 @@
+# The Tower admission policy.
+#
+# The rules the Tower applies to every clearance request. Changing this file
+# changes how the Tower behaves; the version string is recorded with every
+# decision so a decision made under one set of rules can never be confused
+# with a decision made under another.
+#
+# Check it before it goes near real hardware:
+#     the-tower policy --lint --policy policy.example.yaml
+
+version: p-2026.10.1
+format_version: 1
+
+# How much each factor counts when choosing between nodes. The four node
+# weights are normalised; priority is added per priority step.
+scoring:
+  thermal: 0.35     # headroom to the redline
+  load: 0.25        # current CPU load
+  memory: 0.25      # free memory
+  power: 0.15       # power headroom
+  priority: 0.05    # per priority step (P0 gets the most)
+
+# Where the enforcement ladder's rungs sit.
+ladder:
+  warn_headroom_c: 12.0          # below this much thermal headroom, warn
+  throttle_cpu_percent: 90.0     # at this CPU load, admit but throttle
+  throttle_memory_percent: 90.0  # at this memory load, admit but throttle
+  drain_eta_seconds: 120.0       # predicted redline inside this window, drain
+  throttle_cpu_factor: 0.5       # a throttled flight gets half its CPU
+  require_reason_for_kill: true  # a kill without a reason is refused
+  drain_before_kill: true        # drain the node before terminating anything
+
+# How long a claim on a node's resources lives.
+leases:
+  default_ttl_s: 300.0
+  min_ttl_s: 30.0
+  max_ttl_s: 86400.0
+
+# The mode a scope key gets when the request does not say.
+default_scope_mode: write
+
+# How many times a flight may be rescheduled after a redline or an expired
+# lease before it is given up on.
+max_retries: 2
+
+# A node whose telemetry has gone stale is `unknown`, and unknown nodes are
+# never scheduled onto.
+stale_node_is_unknown: true
