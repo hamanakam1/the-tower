@@ -164,3 +164,48 @@ def test_empty_mesh_queues_everything():
     d = decide(flight, snap)
     assert d.decision == ClearanceDecision.QUEUED
     assert d.assigned_node is None
+
+
+# ---- predictive admission ----
+
+def test_a_node_that_will_cook_before_the_flight_lands_is_refused():
+    # the node is fine now, but it will be at redline in 60 seconds
+    snap = MeshSnapshot(nodes=[make_node(predicted_redline_in_s=60)])
+    flight = Flight(task="long job", weight=ResourceWeight(cpu_cores=1, memory_gb=1,
+                                                            duration_est_s=600))
+    d = decide(flight, snap)
+    assert d.decision == ClearanceDecision.QUEUED
+    assert "redline" in d.reason
+
+
+def test_a_node_that_outlives_the_flight_is_accepted():
+    snap = MeshSnapshot(nodes=[make_node(predicted_redline_in_s=3600)])
+    flight = Flight(task="short job", weight=ResourceWeight(cpu_cores=1, memory_gb=1,
+                                                             duration_est_s=600))
+    d = decide(flight, snap)
+    assert d.decision == ClearanceDecision.CLEARED
+
+
+def test_the_rejection_is_explained():
+    snap = MeshSnapshot(nodes=[make_node(predicted_redline_in_s=10)])
+    flight = Flight(task="x", weight=ResourceWeight(cpu_cores=1, memory_gb=1,
+                                                    duration_est_s=600))
+    d = decide(flight, snap)
+    assert "n1" in d.rejected
+    assert "redline" in d.rejected["n1"]
+
+
+def test_a_node_without_a_prediction_is_not_refused():
+    snap = MeshSnapshot(nodes=[make_node(predicted_redline_in_s=None)])
+    flight = Flight(task="x", weight=ResourceWeight(cpu_cores=1, memory_gb=1,
+                                                    duration_est_s=100000))
+    d = decide(flight, snap)
+    assert d.decision == ClearanceDecision.CLEARED
+
+
+def test_rejection_reason_names_the_problem():
+    n = make_node(memory_percent=99.0)
+    w = ResourceWeight(cpu_cores=1, memory_gb=1)
+    assert "memory" in n.rejection_reason(w)
+    n2 = make_node(status="offline")
+    assert "offline" in n2.rejection_reason(w)

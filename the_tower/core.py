@@ -459,6 +459,8 @@ class Tower:
             age = None
             if node.last_seen:
                 age = max(0.0, (now - node.last_seen).total_seconds())
+            # how long until this node reaches its redline, if it is trending up
+            predicted = self.anomaly.trend_summary(node).get("secs_to_redline")
             nodes.append(NodeView(
                 id=node.spec.id,
                 name=node.spec.name,
@@ -479,6 +481,7 @@ class Tower:
                 reserved_memory_gb=reserved["memory_gb"],
                 reserved_gpu=reserved["gpu"],
                 telemetry_age_s=age,
+                predicted_redline_in_s=predicted,
             ))
         in_flight: List[ScopeView] = []
         for f in self.flights.values():

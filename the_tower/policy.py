@@ -56,6 +56,7 @@ class NodeView:
     reserved_memory_gb: float
     reserved_gpu: float
     telemetry_age_s: Optional[float] = None
+    predicted_redline_in_s: Optional[float] = None
 
     def free(self) -> Dict[str, float]:
         mem_free = self.memory_gb * (1 - self.memory_percent / 100.0) - self.reserved_memory_gb
@@ -87,6 +88,54 @@ class NodeView:
         if self.power_watts + w.cpu_cores * 8.0 > self.max_power_watts * 1.05:
             return False
         return True
+
+    def survives(self, w: ResourceWeight) -> bool:
+        """Will the node still be safe when the flight is done?
+
+        A node that is predicted to hit its redline before the flight lands
+        is not a place to put the flight, however much room it has right
+        now. This is the difference between reacting to heat and predicting
+        it.
+        """
+        if self.predicted_redline_in_s is None:
+            return True
+        # the flight must land with a margin, or with the thermal budget
+        # it declared, whichever is larger
+        margin = max(w.thermal_budget_c / 2.0, 5.0)
+        needed = w.duration_est_s + margin
+        return self.predicted_redline_in_s >= needed
+
+    def rejection_reason(self, w: ResourceWeight) -> Optional[str]:
+        """Why this node will not take the flight (None if it will)."""
+        if self.status == NodeStatus.OFFLINE.value:
+            return "the node is offline"
+        if self.status == NodeStatus.UNKNOWN.value:
+            return "the node's telemetry is stale"
+        if self.status == NodeStatus.DRAINING.value:
+            return "the node is draining"
+        if self.status == NodeStatus.CORDONED.value:
+            return "the node is cordoned"
+        if self.status == NodeStatus.MAINTENANCE.value:
+            return "the node is in maintenance"
+        if self.status == NodeStatus.REDLINE.value:
+            return "the node is at its redline"
+        if self.thermal_state == ThermalState.CRITICAL.value:
+            return "the node's thermal state is critical"
+        if self.temperature_c >= self.redline_temp_c:
+            return "the node is already past its redline"
+        free = self.free()
+        if w.cpu_cores > free["cpu"] + 1e-6:
+            return "not enough free CPU"
+        if w.memory_gb > free["memory_gb"] + 1e-6:
+            return "not enough free memory"
+        if w.gpu_units > free["gpu"] + 1e-6:
+            return "not enough free GPU"
+        if self.power_watts + w.cpu_cores * 8.0 > self.max_power_watts * 1.05:
+            return "not enough power headroom"
+        if not self.survives(w):
+            return (f"the node is predicted to hit its redline in "
+                    f"{int(self.predicted_redline_in_s)}s, before the flight would land")
+        return None
 
     def score(self, flight: Flight, policy=None) -> float:
         """Higher is better. Blends thermal, load, memory and power headroom."""
@@ -187,6 +236,7 @@ class Decision:
     scope_conflict: Optional[str] = None
     preempt_flight_id: Optional[str] = None
     considered_nodes: List[str] = field(default_factory=list)
+    rejected: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -200,6 +250,7 @@ class Decision:
             "node_state_at_decision": self.node_state_at_decision,
             "scope_conflict": self.scope_conflict,
             "considered_nodes": self.considered_nodes,
+            "rejected": self.rejected,
         }
 
 
@@ -258,15 +309,19 @@ def decide(flight: Flight, snapshot: MeshSnapshot, policy=None) -> Decision:
             scope_conflict=conflict.flight_id,
         )
 
-    # 3. Candidate nodes: only nodes that can safely take the flight.
+    # 3. Candidate nodes: only nodes that can safely take the flight, now
+    #    and for as long as it will be running.
     scored: Dict[str, float] = {}
     candidates: List[NodeView] = []
     considered: List[str] = []
+    rejected: Dict[str, str] = {}
     for n in snapshot.nodes:
         if flight.preferred_node and flight.preferred_node != n.id:
             continue
         considered.append(n.id)
-        if not n.accepts(flight.weight):
+        reason = n.rejection_reason(flight.weight)
+        if reason is not None:
+            rejected[n.id] = reason
             continue
         s = n.score(flight, policy)
         scored[n.id] = round(s, 6)
@@ -275,13 +330,18 @@ def decide(flight: Flight, snapshot: MeshSnapshot, policy=None) -> Decision:
     if not candidates:
         # 4. Nothing can take it now. Wait for the most plausible node.
         best = _best_eventual_node(snapshot, flight)
+        reason = "no node has sufficient safe capacity"
+        if rejected and all("redline" in r for r in rejected.values()):
+            reason = ("every candidate node is predicted to hit its redline "
+                      "before this flight would land")
         return Decision(
             decision=ClearanceDecision.QUEUED,
-            reason="no node has sufficient safe capacity",
+            reason=reason,
             assigned_node=best.id if best else None,
             estimated_wait_s=30.0,
             scored=scored,
             considered_nodes=considered,
+            rejected=rejected,
         )
 
     # 5. Best node wins.
