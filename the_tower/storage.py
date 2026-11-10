@@ -391,6 +391,28 @@ class Storage:
         self.conn.execute("DELETE FROM flights WHERE id=?", (flight_id,))
         self.conn.commit()
 
+    @_serialised
+    def prune_flights(self, older_than_s: float, now: Optional[float] = None) -> int:
+        """Delete flights that finished long ago.
+
+        Only terminal flights are removed: a flight that is queued or in
+        the air is never pruned, however old it is.
+        """
+        now = now if now is not None else time.time()
+        cutoff = now - older_than_s
+        cutoff_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(cutoff))
+        cursor = self.conn.execute(
+            "DELETE FROM flights WHERE status IN (?,?,?) AND submitted_at < ?",
+            ("landed", "shot_down", "denied", cutoff_iso),
+        )
+        self.conn.commit()
+        return cursor.rowcount or 0
+
+    @_serialised
+    def count_flights(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) FROM flights").fetchone()
+        return row[0] if row else 0
+
     # ---- events ----
     @_serialised
     def append_event(self, e: TowerEvent):

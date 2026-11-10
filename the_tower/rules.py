@@ -96,6 +96,7 @@ class Policy:
     default_scope_mode: str = ScopeMode.WRITE.value
     max_retries: int = 2
     stale_node_is_unknown: bool = True
+    flight_retention_days: int = 30
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -107,6 +108,7 @@ class Policy:
             "default_scope_mode": self.default_scope_mode,
             "max_retries": self.max_retries,
             "stale_node_is_unknown": self.stale_node_is_unknown,
+            "flight_retention_days": self.flight_retention_days,
             "source": self.source,
         }
 
@@ -196,6 +198,10 @@ def lint(data: Dict[str, Any]) -> List[str]:
     if retries is not None and (not isinstance(retries, int) or retries < 0):
         problems.append("max_retries must be a non-negative integer")
 
+    retention = data.get("flight_retention_days")
+    if retention is not None and (not isinstance(retention, int) or retention < 0):
+        problems.append("flight_retention_days must be a non-negative integer")
+
     return problems
 
 
@@ -236,6 +242,7 @@ def from_dict(data: Dict[str, Any], source: Optional[str] = None) -> Policy:
         default_scope_mode=str(data.get("default_scope_mode", ScopeMode.WRITE.value)),
         max_retries=int(data.get("max_retries", 2)),
         stale_node_is_unknown=bool(data.get("stale_node_is_unknown", True)),
+        flight_retention_days=int(data.get("flight_retention_days", 30)),
     )
 
 

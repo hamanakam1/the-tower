@@ -99,6 +99,8 @@ class Tower:
         self._node_ladder: Dict[str, Any] = {}
         # last telemetry rollup (epoch seconds)
         self._last_rollup: float = 0.0
+        # last flight prune (epoch seconds)
+        self._last_prune: float = 0.0
         # lease id -> Lease (the Tower's claims on node resources)
         self.leases: Dict[str, Lease] = {}
         # Processes the Tower is allowed to stop. Only a PID that was
@@ -219,6 +221,7 @@ class Tower:
                 logger.warning("stale kill error: %s", e)
         # telemetry retention: roll old samples up so history stays small
         await self._maybe_rollup()
+        await self._maybe_prune_flights()
         # release the resources of any lease whose worker went away
         reaped = self.reap_expired_leases()
         if reaped:
@@ -239,6 +242,20 @@ class Tower:
         if result and result.get("rolled"):
             logger.info("telemetry rollup: %s samples rolled, %s deleted",
                         result["rolled"], result["deleted"])
+
+    async def _maybe_prune_flights(self):
+        """Forget finished flights once they are old enough to not matter."""
+        now = time.time()
+        if now - self._last_prune < 3600:
+            return
+        self._last_prune = now
+        if self.storage is None:
+            return
+        cutoff_s = self.policy.flight_retention_days * 86400.0
+        removed = await self._store(self.storage.prune_flights, cutoff_s, now)
+        if removed:
+            logger.info("pruned %s finished flight(s) older than %s days",
+                        removed, self.policy.flight_retention_days)
 
     async def _auto_kill_on_redline(self, node_id: str):
         node = self.nodes.get(node_id)
@@ -729,21 +746,6 @@ class Tower:
         self._index_scope(flight)
         if self.storage is not None:
             await self._store(self.storage.upsert_flight, flight)
-
-    def _best_eventual_node(self, flight: Flight) -> Optional[str]:
-        # node with most free memory among online
-        best = None
-        best_mem = -1
-        for nid, node in self.nodes.items():
-            if node.status == NodeStatus.OFFLINE:
-                continue
-            if flight.preferred_node and flight.preferred_node != nid:
-                continue
-            free = node.capacity_free()
-            if free["memory_gb"] > best_mem:
-                best_mem = free["memory_gb"]
-                best = nid
-        return best
 
     # ---------------- kill ----------------
     async def kill(self, req: KillRequest) -> KillResponse:

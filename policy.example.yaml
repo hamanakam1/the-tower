@@ -46,3 +46,8 @@ max_retries: 2
 # A node whose telemetry has gone stale is `unknown`, and unknown nodes are
 # never scheduled onto.
 stale_node_is_unknown: true
+
+# How long a finished flight is remembered. A flight that has landed or been
+# shot down is deleted from the ledger after this many days. A flight that
+# is queued or in the air is never deleted, however old it is.
+flight_retention_days: 30

@@ -150,6 +150,43 @@ def test_containers_persist(tmp_path):
     assert loaded[0]["metadata"]["pid"] == 123
 
 
+def test_flight_retention_prunes_only_finished_flights(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from the_tower.schemas import Flight, ResourceWeight, FlightStatus
+
+    s = Storage(str(tmp_path / "ret.sqlite"))
+    old = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+
+    landed = Flight(task="landed", weight=ResourceWeight(cpu_cores=1, memory_gb=1))
+    landed.status = FlightStatus.LANDED
+    landed.submitted_at = datetime.now(timezone.utc) - timedelta(days=90)
+    s.upsert_flight(landed)
+
+    airborne = Flight(task="airborne", weight=ResourceWeight(cpu_cores=1, memory_gb=1))
+    airborne.status = FlightStatus.IN_FLIGHT
+    airborne.submitted_at = datetime.now(timezone.utc) - timedelta(days=90)
+    s.upsert_flight(airborne)
+
+    removed = s.prune_flights(30 * 86400)
+    assert removed == 1
+    remaining = [f.task for f in s.load_flights()]
+    assert "airborne" in remaining
+    assert "landed" not in remaining
+    s.close()
+
+
+def test_flight_retention_keeps_recent_flights(tmp_path):
+    from the_tower.schemas import Flight, ResourceWeight, FlightStatus
+
+    s = Storage(str(tmp_path / "ret2.sqlite"))
+    recent = Flight(task="recent", weight=ResourceWeight(cpu_cores=1, memory_gb=1))
+    recent.status = FlightStatus.LANDED
+    s.upsert_flight(recent)
+    assert s.prune_flights(30 * 86400) == 0
+    assert s.count_flights() == 1
+    s.close()
+
+
 def test_telemetry_rollup_keeps_history_small(tmp_path):
     from datetime import datetime, timedelta, timezone
     from the_tower.schemas import Telemetry
