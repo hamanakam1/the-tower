@@ -49,6 +49,10 @@ def build_parser():
     agent.add_argument("--sensor", default="", help="temperature backend: psutil, osx-cpu-temp, estimate")
     agent.add_argument("--lease", default="", help="lease id to renew on every sweep")
     agent.add_argument("--lease-ttl", type=float, default=300.0)
+    agent.add_argument("--spool", default="",
+                       help="path to an on-disk buffer for samples that could not be delivered")
+    agent.add_argument("--no-discover-lease", action="store_true",
+                       help="do not ask the tower which lease this node holds")
     agent.add_argument("--register", action="store_true",
                        help="Register this node with the tower before reporting, "
                             "describing the machine the agent is running on")
@@ -201,7 +205,8 @@ def main():
         from .agent import run
         asyncio.run(run(args.tower, node_id, args.interval, args.token, args.sensor,
                         args.lease, args.lease_ttl, args.register, args.redline,
-                        args.role, args.location, args.enforcement, args.staleness))
+                        args.role, args.location, args.enforcement, args.staleness,
+                        args.spool, not args.no_discover_lease))
     else:
         print(f"Unknown command: {args.command}", file=sys.stderr)
         sys.exit(1)
