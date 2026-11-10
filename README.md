@@ -203,8 +203,15 @@ the-tower config           # the effective configuration
 the-tower policy           # the admission rules in force
 the-tower policy --lint --policy policy.example.yaml
 the-tower demo             # seed demo flights against a running Tower
+the-tower verify           # check that the Tower is trustworthy
 the-tower agent --tower http://<tower>:8765 --node-id pi-01 --register   # node agent
 ```
+
+`the-tower verify` is the check to run before pointing the Tower at a real
+machine. It confirms the audit chain has not been tampered with, the schema
+matches the code, the policy in force is valid, every node is reporting
+recently, no lease is stranded and no flight is in the air without a node.
+It changes nothing.
 
 ### Configuration
 
@@ -262,6 +269,8 @@ volume. See the [package on GitHub](https://github.com/hamanakam1/the-tower/pkgs
 - `DELETE /leases/:id` - Release a lease
 - `GET /decisions` - Recorded clearance decisions
 - `POST /replay` - Re-derive a decision from its recorded snapshot
+- `GET /policy` - The admission rules in force
+- `GET /verify` - Self-check report (503 when something is wrong)
 
 ## Adding a real node
 

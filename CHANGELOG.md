@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- **Self-verification** (`the-tower verify`, `GET /verify`) — an operator's
+  check that the things the Tower relies on are working: the audit chain
+  verifies, the schema matches the code, the policy is valid, every node is
+  reporting, no lease is stranded and no flight is in the air without a
+  node. It changes nothing.
+- **Flight retention** — finished flights are forgotten after
+  `flight_retention_days` (policy-driven). A queued or airborne flight is
+  never deleted, however old it is.
 - **Hierarchical scope keys** (`the_tower/scopes.py`) — scope claims are
   resource paths (`model/lora/v2`) with an access mode (`read`, `write`,
   `intent`). Two readers never conflict; a reader and a writer do; a parent
