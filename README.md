@@ -177,10 +177,11 @@ including another `intent`.
 - **Advisory Mode** - Per-node opt-in: the Tower recommends instead of acting
 - **Explainability** - Every clearance carries the node state it saw, the score of every candidate and a policy version — and can be replayed later
 - **Persistence** - SQLite-backed flights, events, telemetry, audit hash chain, versioned migrations, rolled-up telemetry
+- **Declarative Policy** - The rules live in a versioned YAML file with a linter (`the-tower policy --lint`); every decision records the policy version and fingerprint it was made under
 - **Live Push** - WebSocket airspace broadcasts
 - **Auth** - Optional bearer token for every mutating endpoint and the WebSocket; the dashboard asks for it once and remembers it
 - **Metrics** - Prometheus `/metrics` endpoint
-- **Telemetry Agent** - `the-tower agent` pushes local node metrics
+- **Telemetry Agent** - `the-tower agent` pushes local node metrics, spools them on disk when the link is down, discovers and renews its own lease, and releases it on shutdown
 - **Container** - Dockerfile for one-command deployment
 
 ## Hardware Topology
@@ -199,9 +200,24 @@ the-tower serve            # API + dashboard on http://127.0.0.1:8765
 the-tower radar            # one-shot telemetry sweep
 the-tower status --watch   # node health, live
 the-tower config           # the effective configuration
+the-tower policy           # the admission rules in force
+the-tower policy --lint --policy policy.example.yaml
 the-tower demo             # seed demo flights against a running Tower
-the-tower agent --tower http://<tower>:8765 --node-id pi-01   # node agent
+the-tower agent --tower http://<tower>:8765 --node-id pi-01 --register   # node agent
 ```
+
+### Configuration
+
+Two files, two jobs:
+
+| File | What it holds |
+|---|---|
+| `config.example.yaml` | where the Tower runs: database, sweep interval, nodes, token, rate limit |
+| `policy.example.yaml` | the rules the Tower applies: scoring weights, ladder thresholds, lease lengths, retry limits |
+
+Both are linted before they are trusted — `the-tower config` shows what is
+in force, and `the-tower policy --lint` refuses a policy file that does not
+make sense.
 
 ### Container image
 

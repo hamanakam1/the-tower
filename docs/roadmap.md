@@ -265,6 +265,9 @@ what was intended.
 | — | Advisory vs enforce (§3.5) | **done** | `NodeSpec.enforcement`, advisory by default; the Tower recommends instead of acting |
 | — | Decision replay (§3.1) | **done** | `the_tower/replay.py`; `POST /replay`, `GET /decisions` |
 | — | Node lifecycle states | **done** | draining / cordoned / maintenance / offline / unknown |
+| — | Hierarchical scope keys (1.6) | **done** | `the_tower/scopes.py`: paths with `read`/`write`/`intent` modes |
+| — | Declarative policy (2.1) | **done** | `the_tower/rules.py`: versioned YAML, a linter, and a policy fingerprint on every decision |
+| — | Agent spool and lease lifecycle (1.1) | **done** | `the_tower/spool.py`; the agent spools, discovers its lease and releases it on shutdown |
 | — | Leases | **done** | `core.py::issue_lease`; renewal, expiry and automatic rescheduling |
 
 ### The guarantees that now hold
@@ -308,6 +311,12 @@ Each one has a test.
 exposes none to unprivileged processes, so the local node's temperature is a
 labelled estimate), and rolling the `simplify` pass further into
 `core.py`.
+
+**Still open in Horizon 1:** the agent is still a single process, not a
+supervised service — there is no systemd unit, no on-disk queue for *leases*
+(the telemetry queue is done), and no agent-side enforcement of the Tower's
+stop orders. The scope model is hierarchical but the modes are still
+per-key rather than per-subtree.
 
 ---
 

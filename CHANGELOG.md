@@ -6,6 +6,18 @@
   `intent`). Two readers never conflict; a reader and a writer do; a parent
   path covers its children; an `intent` conflicts with everything that
   touches the same subtree.
+- **Declarative policy** (`the_tower/rules.py`) — the rules the Tower
+  applies live in a versioned YAML file, not in Python constants. Scoring
+  weights, ladder thresholds, lease lengths and retry limits are all
+  policy. `the-tower policy --lint` checks a policy file before it is
+  trusted; `GET /policy` returns the rules in force; every decision records
+  the policy version and fingerprint it was made under.
+- **Agent spool** (`the_tower/spool.py`) — a node agent that cannot reach
+  the Tower keeps its samples on disk and replays them, oldest first, when
+  the link returns. A network blip is a gap in the history, not a hole.
+- **Agent lease discovery and graceful shutdown** — the agent asks the
+  Tower which lease it holds, renews it, and releases it on `SIGTERM`
+  instead of letting it expire.
 
 ## 0.4.0
 
